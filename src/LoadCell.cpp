@@ -29,7 +29,7 @@ void calibrate(HX711_ADC cell, boolean save_to_eprom, int calVal_eepromAdress)
     Serial.println("Now, place your known mass on the loadcell.");
     Serial.println("Then send the weight of this mass (i.e. 100.0) from serial monitor.");
 
-    float known_mass = 0;
+    float known_mass = 100;
     _resume = false;
     while (_resume == false)
     {
@@ -52,7 +52,6 @@ void calibrate(HX711_ADC cell, boolean save_to_eprom, int calVal_eepromAdress)
     Serial.print("New calibration value has been set to: ");
     Serial.print(newCalibrationValue);
     Serial.println(", use this as calibration value (calFactor) in your project sketch.");
-
 
     _resume = false;
 
