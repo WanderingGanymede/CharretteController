@@ -31,6 +31,8 @@ public:
 
     // Display a text message centered on the screen
     void displayMessage(const String &msg);
+    void displayEightParams(const String &param1, const String &param2, const String &param3, const String &param4,
+                            const String &param5, const String &param6, const String &param7, const String &param8);
     // Display up to 4 parameters at the screen corners
     void displayFourParams(const String &param1, const String &param2, const String &param3, const String &param4);
 

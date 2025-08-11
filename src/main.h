@@ -9,6 +9,7 @@ void displayDebugInfo();
 // Usage: bikeDisplay.displayFourParams(...)
 
 // Existing function declarations
+void miseAJourPID();
 void updateVescTelemetry();
 int InitializeStrengthSensor();
 int initializeVesc();

@@ -11,9 +11,11 @@ const int CALIBRATE_BUTTON_PIN = 18; // Use pin 4 for calibration button
 #include <Arduino.h>
 #include "HX711_ADC.h"
 #include "LoadCell.h"
+// ...existing code...
 #include <Chrono.h>
 #include <PID_v1.h>
 #include <SoftFilters.h>
+#include "InputControl.h"
 // put function declarations here:
 int myFunction(int, int);
 
@@ -133,7 +135,7 @@ float pwmMin = 110, pwmMax = 255;               // les valeurs minimales et maxi
                                                 // 110 a été trouvée expérimentalement avec une batterie 48V et un contrôleur Ozo. En deça la roue ne tourne pas.
                                                 // ces valeurs sont à tester et corriger en cas de changement de batterie ou contrôleur.
 
-PID myPID(&valeurCapteur, &sortieMoteur, &consigneCapteur, K1[0], K1[1], K1[2], P_ON_E, REVERSE);
+PID mainPID(&valeurCapteur, &sortieMoteur, &consigneCapteur, K1[0], K1[1], K1[2], P_ON_E, REVERSE);
 // Entrée: ValeurCapteur
 // Valeur asservie: SortieMoteur, qui est un PWM allant de pwmMin à pwmMax
 // ConsigneCapteur: Valeur visée pour ValeurCapteur
@@ -217,88 +219,21 @@ int ctrlAlive = 12;  // sur cette pin arrive le 5V de la gachette. Cette informa
 int ctrlSwitch = 13; // pin utilisée pour allumer le relais qui activait le contrôleur. Inutilisée depuis que le relais est activé en direct par un interrupteur. A nettoyer
 bool isCtrlAlive = debugMotor ? 1 : 0;
 
-int button4 = 19;
-int button3 = 20;
-int button2 = 21;
-int button1 = 22;
-
-int button2Val = 0;
-unsigned long t = 0;
-
-int powerPin = D18; // pin pour allumer le controleur            Jaune
-int motorBrakePin = D19;
-int walkPin = D20; // pin pour activer le mode piéton;           Rouge
-Chrono powerChrono, motorBrakeChrono, walkChrono;
-bool powerNewState, motorBrakeNewState, walkNewState = 0;
-int debounceTime = 100;
-
-bool powerCtrl = old ? 1 : 0;
 bool walkMode = 1;
 bool motorBrakeMode = 0;
-void pluss() {}
-unsigned long lastButton1Time = 0;
-unsigned long lastButton2Time = 0;
-unsigned long lastButton3Time = 0;
-unsigned long lastButton4Time = 0;
-const unsigned long debounceDelay = 50;
 
-void Button1()
-{
-  unsigned long now = millis();
-  if (now - lastButton1Time < debounceDelay)
-    return;
-  lastButton1Time = now;
-  Serial.print("Toggled button1 a is now ");
-  int val = digitalRead(button1);
-  Serial.println(val);
-}
-
-void Button2()
-{
-  unsigned long now = millis();
-  if (now - lastButton2Time < debounceDelay)
-    return;
-  lastButton2Time = now;
-  int val = digitalRead(button2);
-  button2Val = val;
-}
-
-void Button3()
-{
-  unsigned long now = millis();
-  if (now - lastButton3Time < debounceDelay)
-    return;
-  lastButton3Time = now;
-  Serial.print("Toggled button3 a is now ");
-  int val = digitalRead(button3);
-  Serial.println(val);
-}
-
-void Button4()
-{
-  unsigned long now = millis();
-  if (now - lastButton4Time < debounceDelay)
-    return;
-  lastButton4Time = now;
-  Serial.print("Toggled button4 a is now ");
-  int val = digitalRead(button4);
-  Serial.println(val);
-}
-void test()
-{
-  Serial.println("Test function called");
-}
 void setup()
 {
 
   Serial.begin(9600);
-  delay(200);
+  delay(500);
   Serial.println("###################");
-  Serial.println("## version 0.9.7: ");
-  Serial.println("## date: 30/10/2021: ");
+  Serial.println("## version 0.1: ");
+  Serial.println("## date: : ");
   Serial.println("## Boulanger ");
   Serial.println("###################");
 
+  setupInputControl();
   /*
     On a un nouveau boîtier de contrôle.
     Le mode est lu en fonction de analogRead sur walkPin.
@@ -308,41 +243,28 @@ void setup()
         Mode 0: analogRead = 1023 (éteint)
 
   */
-  pinMode(button1, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(button1), Button1, CHANGE);
-  pinMode(button2, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(button2), Button2, CHANGE);
-  pinMode(button3, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(button3), Button3, CHANGE);
-  pinMode(button4, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(button4), Button4, CHANGE);
   // kkinterrupteur sur la carte
   pinMode(plus, INPUT_PULLUP);
   pinMode(moins, INPUT_PULLUP);
   pinMode(halt, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(plus), pluss, CHANGE);
-  pinMode(powerPin, INPUT_PULLUP);
-  pinMode(motorBrakePin, INPUT_PULLUP);
 
   // PID
-  myPID.SetMode(MANUAL);
-  myPID.SetOutputLimits(pwmMin, pwmMax);
-  myPID.SetSampleTime(200);
+  mainPID.SetMode(MANUAL);
+  mainPID.SetOutputLimits(pwmMin, pwmMax);
+  mainPID.SetSampleTime(200);
 
   // Controleur
   pinMode(ctrlAlive, INPUT);
   pinMode(ctrlSwitch, OUTPUT);
 
   digitalWrite(ctrlSwitch, false);
-  delay(2000);
-  test();
-  delay(2000);
+  delay(1000);
   Wire1.setSDA(sdaWire1);
   Wire1.setSCL(sclWire1);
   Wire1.begin();
   bikeDisplay.begin();
   bikeDisplay.displayMessage("Bike Display Ready");
-  delay(2000);
+  delay(1000);
 
   initializeVesc();
   delay(2000);
@@ -356,7 +278,8 @@ void setup()
 
 void loop()
 {
-
+  InputControlHandler();
+  // Call the toggle handler to check for toggle presses
   if (capteurInitialise)
   {
     capteur.update(&newDataReady, &valeurCapteur);
@@ -368,6 +291,7 @@ void loop()
   // Update VESC telemetry every vescUpdateInterval ms
   if (millis() - lastVescUpdate >= vescUpdateInterval)
   {
+    ;
     updateVescTelemetry();
     lastVescUpdate = millis();
   }
@@ -381,26 +305,22 @@ void loop()
     powerChrono.stop();
     switchCtrl(powerCtrl);
   }*/
+  // Spam the button to reset???
 
-  if (motorBrakeChrono.elapsed() > debounceTime && digitalRead(motorBrakePin) == motorBrakeNewState)
-  {
-    motorBrakeMode = !motorBrakeNewState;
-    motorBrakeChrono.restart();
-    motorBrakeChrono.stop();
-
-    // reset capteur de force
-    // Quand on active le frein moteur, si en mode 0
-    if (powerCtrl == 0 && etat == INITIALISATION)
+  /*   if (motorBrakeChrono.elapsed() > debounceTime && digitalRead(motorBrakePin) == motorBrakeNewState)
     {
-      resetOffsetChrono.restart();
-      resetOffsetIter++;
-    }
-  }
-  // handled by interrup in button2
-  if (button2Val == 0 && walkMode == 1)
-    setMode(0);
-  else if (button2Val == 1 && walkMode == 0)
-    setMode(1);
+      motorBrakeMode = !motorBrakeNewState;
+      motorBrakeChrono.restart();
+      motorBrakeChrono.stop();
+
+      // reset capteur de force
+      // Quand on active le frein moteur, si en mode 0
+      if (powerCtrl == 0 && etat == INITIALISATION)
+      {
+        resetOffsetChrono.restart();
+        resetOffsetIter++;
+      }
+    } */
 
   ////////////////////////////////////////////////////:
   ///////////////////  0  ////////////////////////////
@@ -441,7 +361,7 @@ void loop()
   else if (etat == ATTENTE)
   {
 
-    myPID.SetMode(MANUAL);
+    mainPID.SetMode(MANUAL);
     // moteur.setMoteurState(STOPPED);
     sortieMoteur = 0;
     capteur.setThresholdSensor(0.5);
@@ -476,7 +396,7 @@ void loop()
   else if (etat == ROULE)
   {
     // moteur.setMoteurState(SPINNING);
-    myPID.SetMode(AUTOMATIC);
+    mainPID.SetMode(AUTOMATIC);
     // miseAJourPID();
     // if (!flowingChrono.isRunning())
     //{
@@ -487,6 +407,7 @@ void loop()
     //   flowingOrNot();
 
     if (transition5())
+
     {
       etat = FREINAGE;
     }
@@ -504,8 +425,8 @@ void loop()
   {
     // moteur.setMoteurState(SPINNING);
 
-    myPID.SetMode(AUTOMATIC);
-    // miseAJourPID();
+    mainPID.SetMode(AUTOMATIC);
+    miseAJourPID();
 
     if (transition5())
     {
@@ -527,7 +448,7 @@ void loop()
   {
 
     // moteur.setMoteurState(STOPPED);
-    myPID.SetMode(MANUAL);
+    mainPID.SetMode(MANUAL);
     sortieMoteur = 0;
 
     if (transition5())
@@ -551,7 +472,7 @@ void loop()
   else if (etat == FREINAGE)
   {
 
-    myPID.SetMode(MANUAL);
+    mainPID.SetMode(MANUAL);
     // moteur.setMoteurState(BRAKING);
     sortieMoteur = 0;
     capteur.setThresholdSensor(0.5);
@@ -617,16 +538,22 @@ void loop()
     Serial.println("Sortie de cas");
   }
 
-  // --- Test: Display 4 parameters at corners ---
+  // --- Test: Display 8 parameters in 4 rows ---
   static unsigned long lastParamTest = 0;
   if (millis() - lastParamTest > 1000)
   {
     lastParamTest = millis();
-    bikeDisplay.displayFourParams(
+    int b2 = (int)digitalRead(toggle2Pin);
+    String walkModeStr = walkMode ? "Walk" : "Ride";
+    bikeDisplay.displayEightParams(
         String("A:") + String(rCapteur.value, 1),
         String("B:") + String(valeurCapteur, 2),
         String("C:") + String(vescTelemetry.rpm, 0),
-        String("D:") + String(vescTelemetry.voltage, 1));
+        String("D:") + walkModeStr,
+        String("E:") + String(vescTelemetry.current, 1),
+        String("F:") + String(vescTelemetry.duty, 2),
+        String("G:") + String(vescTelemetry.tempMosfet, 1),
+        String("H:") + String(vescTelemetry.tempMotor, 1));
   }
 }
 
@@ -741,7 +668,7 @@ int initializeVesc()
   if (!Serial2)
   {
     bikeDisplay.displayMessage("Serial2 Error");
-    ;
+
     // Fallback: Use Seial (USB) to report error
     Serial.println("Error: Serial2 failed to initialize!");
     return 1; // Or enter a safe state
@@ -771,7 +698,7 @@ void setMode(int mode)
     consigneCapteur = consigneCapteurTab[1];
     beta = betaTab[1];
     brakeThreshold = gammaTab[1];
-    myPID.SetOutputLimits(pwmMin, pwmMax);
+    mainPID.SetOutputLimits(pwmMin, pwmMax);
   }
   else
   {
@@ -779,7 +706,7 @@ void setMode(int mode)
     beta = betaTab[0];
     brakeThreshold = gammaTab[0];
     consigneCapteur = consigneCapteurTab[0];
-    myPID.SetOutputLimits(pwmMin, pwmMax);
+    mainPID.SetOutputLimits(pwmMin, pwmMax);
   }
 
   setPIDMode(walkMode);
@@ -805,12 +732,19 @@ void setPIDMode(bool walkOrNot)
 {
   if (walkOrNot)
   {
-    myPID.SetTunings(K2[0], K2[1], K2[2]);
+    mainPID.SetTunings(K2[0], K2[1], K2[2]);
   }
   else
   {
-    myPID.SetTunings(K1[0], K1[1], K1[2]);
+    mainPID.SetTunings(K1[0], K1[1], K1[2]);
   }
+}
+
+void miseAJourPID()
+{
+  // lectureVitesse = vitesseInstantanee;
+  if (!haltFlag)
+    mainPID.Compute();
 }
 
 bool transition01()
