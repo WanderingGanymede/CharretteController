@@ -75,6 +75,18 @@
   "files.associations": {
     "cstdint": "cpp",
     "random": "cpp",
-    "cmath": "cpp"
+    "cmath": "cpp",
+    "*.inc": "cpp",
+    "cstdlib": "cpp",
+    "format": "cpp",
+    "array": "cpp",
+    "deque": "cpp",
+    "string": "cpp",
+    "unordered_map": "cpp",
+    "vector": "cpp",
+    "string_view": "cpp",
+    "initializer_list": "cpp",
+    "span": "cpp",
+    "text_encoding": "cpp"
   }
 }

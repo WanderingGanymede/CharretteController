@@ -3,30 +3,19 @@
 #include <Chrono.h>
 #include "main.h"
 // --- Toggle pins and state ---
-int toggle4Pin = 19;
-int toggle3Pin = 20;
-int toggle2Pin = 21;
-int toggle1Pin = 22;
+int toggle3Pin = 18;
+int toggle2Pin = 17;
+int toggle1Pin = 16;
 Chrono toggle1Chrono, toggle2Chrono, toggle3Chrono, toggle4Chrono;
 bool toggle1Debouncing = 0;
 bool toggle2Debouncing = 0;
 bool toggle3Debouncing = 0;
-bool toggle4Debouncing = 0;
 int toggle1State = 0;
 int toggle2State = 0;
 int toggle3State = 0;
-int toggle4State = 0;
 int toggle1NewState = 0;
 int toggle2NewState = 0;
 int toggle3NewState = 0;
-int toggle4NewState = 0;
-
-// --- Button (momentary) pins and state ---
-int buttonA = 23;
-int buttonB = 24;
-int buttonC = 25;
-bool buttonAState = 0, buttonBState = 0, buttonCState = 0;
-bool buttonAPrevState = 0, buttonBPrevState = 0, buttonCPrevState = 0;
 
 // Forward declarations for user actions
 void setMode(int mode);
@@ -66,19 +55,13 @@ void buttonCPressed();
 void buttonCReleased();
 
 const int debounceTime = 75;
-
 void setupInputControl()
 {
 
     pinMode(toggle1Pin, INPUT_PULLUP);
     pinMode(toggle2Pin, INPUT_PULLUP);
     pinMode(toggle3Pin, INPUT_PULLUP);
-    pinMode(toggle4Pin, INPUT_PULLUP);
-    pinMode(buttonA, INPUT_PULLUP);
-    pinMode(buttonB, INPUT_PULLUP);
-    pinMode(buttonC, INPUT_PULLUP);
 }
-
 void InputControlHandler()
 {
     // Toggle 2 logic
@@ -138,42 +121,33 @@ void InputControlHandler()
         Serial.println(toggle3State);
         // TODO: handle toggle 3 action here
     }
-    // Toggle 4 logic
-    if (digitalRead(toggle4Pin) != toggle4State && !toggle4Debouncing)
-    {
-        toggle4Chrono.restart();
-        toggle4NewState = digitalRead(toggle4Pin);
-        toggle4Debouncing = 1;
-        Serial.print("Button 4 pressed starting debounce check, new state: ");
-        Serial.println(toggle4NewState);
-    }
-    if (toggle4Chrono.elapsed() > debounceTime && digitalRead(toggle4Pin) == toggle4NewState)
-    {
-        toggle4State = toggle4NewState;
-        toggle4Chrono.restart();
-        toggle4Chrono.stop();
-        toggle4Debouncing = 0;
-        Serial.print("Button 4 state changed to: ");
-        Serial.println(toggle4State);
-        // TODO: handle toggle 4 action here
-    }
-    // --- Momentary button logic ---
-    buttonAState = !digitalRead(buttonA);
-    buttonBState = !digitalRead(buttonB);
-    buttonCState = !digitalRead(buttonC);
-    if (buttonAState && !buttonAPrevState)
-        buttonAPressed();
-    if (!buttonAState && buttonAPrevState)
-        buttonAReleased();
-    buttonAPrevState = buttonAState;
-    if (buttonBState && !buttonBPrevState)
-        buttonBPressed();
-    if (!buttonBState && buttonBPrevState)
-        buttonBReleased();
-    buttonBPrevState = buttonBState;
-    if (buttonCState && !buttonCPrevState)
-        buttonCPressed();
-    if (!buttonCState && buttonCPrevState)
-        buttonCReleased();
-    buttonCPrevState = buttonCState;
+}
+
+// --- ADC (Analog) input handling for Pi Pico ---
+int adc0Pin = 26;
+int adc1Pin = 27;
+int adc0Value = 0;
+int adc1Value = 0;
+
+void readADCInputs()
+{
+    adc0Value = analogRead(adc0Pin); // ADC0 is GPIO26
+    adc1Value = analogRead(adc1Pin); // ADC1 is GPIO27
+}
+
+int getADC0()
+{
+    return adc0Value;
+}
+
+float getBrakesMapped(float in_min, float in_max, float out_min, float out_max)
+{
+    float res = (float)(adc0Value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+    // cap res to 0 - 1
+    res = res < 0 ? 0 : (res > 1 ? 1 : res);
+    return res;
+}
+int getADC1()
+{
+    return adc1Value;
 }

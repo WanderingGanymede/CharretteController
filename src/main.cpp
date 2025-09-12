@@ -43,7 +43,7 @@ float maxLoadCellValue = 0;
 bool debugPython = 0;  // pour envoyer les données au format attendu par le script python
 bool debug = 0;        // pour envoyer les données de debug au format texte dans le moniteur série
 bool debugCsv = 0;     // pour envoyer les données de debug au format csv dans le moniteur série
-bool debugMotor = 0;   // si aucun moteur n'est branché, pour le simuler
+bool debugMotor = 1;   // si aucun moteur n'est branché, pour le simuler
 bool debugFrein = 0;   // si aucun interrupteur n'est branché, sur le frein à inertie. Inutilisé actuellement
 bool debugCapteur = 0; // si aucun capteur de force n'est branché, pour le simuler
 bool debugOther = 0;   // utilisé à des fins de tests.
@@ -54,11 +54,11 @@ int csvIter = 0;       // compteur d'itération pour l'affichage csv
 /////////////// capteur force ///////////////////
 /////////////////////////////////////////////////
 
-const int HX711_dout = 12; // mcu > HX711 dout pin
-const int HX711_sck = 13;  // mcu > HX711 sck pin
-double capteur_offset = 841.86;
-
-StrengthSensor capteur(HX711_dout, HX711_sck, capteur_offset);
+const int HX711_dout = 20; // mcu > HX711 dout pin
+const int HX711_sck = 21;  // mcu > HX711 sck pin
+double capteur_offset = 838 / 2.5f;
+float capteur_calibration = 25000;
+StrengthSensor capteur(HX711_dout, HX711_sck, capteur_offset, capteur_calibration, 0.5f);
 // pour calculer la dérivée du capteur de force. Inutilisé
 DifferentialFilter<double, unsigned long> diffCapteur;
 Reading<double, unsigned long> rCapteur;
@@ -84,7 +84,7 @@ const int serial1TX = 0;
 const int serial2RX = 5;
 const int serial2TX = 4;
 Vesc vesc;
-bool vescResponsive = true;
+bool vescResponsive = false;
 // VESC telemetry storage
 struct VescTelemetry
 {
@@ -161,6 +161,7 @@ enum etats_enum
 
 int etat = INITIALISATION;
 
+static String etatsStr[] = {"INIT", "ATT", "ROULE", "S_QUO", "DECEL", "FREIN", "MARCHE", "RESET"};
 // Ancre paramètre 2
 
 float alpha = 1;                    // seuil au dessus duquel le PID se calcule et se lance
@@ -197,11 +198,16 @@ double vitesseInstantanee;
  */
 
 const int frein = debugFrein ? 4 : 5;
-Chrono chronoFrein;
+// Chrono chronoFrein;
 bool freinFlag = 0;
 int t1 = 300;
 int t2 = 1000;
 int t3 = 1500;
+
+////gachette frein
+
+float brakeThumbThrottleThreshold = 0.03; // Seuil au delà duquel on considère que la gachette de frein est actionnée
+
 /////////////////////////////////////////////////
 ///////////// Pin interrupteur debug ////////////
 /////////////////////////////////////////////////
@@ -224,7 +230,6 @@ bool motorBrakeMode = 0;
 
 void setup()
 {
-
   Serial.begin(9600);
   delay(500);
   Serial.println("###################");
@@ -272,8 +277,6 @@ void setup()
   Serial.println();
   bikeDisplay.displayMessage("Starting Charrette");
   Serial.println("Starting Charrette yo...");
-  // Example: show a value on the display at startup
-  // bikeDisplay.displayMainDistance(1234); // Show 1234 meters as a test
 }
 
 void loop()
@@ -343,14 +346,20 @@ void loop()
 
     if (transition5())
     {
+      // if (debug)
+      //{
+      Serial.println("Transition 5 from INIT");
+      //}
       etat = FREINAGE;
     }
     else if (transition01())
     {
+      Serial.println("Transition ATTENTE from INIT");
       etat = ATTENTE;
     }
     else if (transition07())
     {
+      Serial.println("Transition RESET from INIT");
       etat = RESET_CAPTEUR;
     }
   }
@@ -495,7 +504,7 @@ void loop()
     else if (transition0())
       etat = INITIALISATION;
     else if (transition52())
-      etat = ATTENTE; // ROULE;
+      etat = ROULE;
     else if (transition51())
       etat = ATTENTE;
   }
@@ -540,27 +549,37 @@ void loop()
 
   // --- Test: Display 8 parameters in 4 rows ---
   static unsigned long lastParamTest = 0;
-  if (millis() - lastParamTest > 1000)
+  if (millis() - lastParamTest > 200)
   {
+    readADCInputs();
     lastParamTest = millis();
     int b2 = (int)digitalRead(toggle2Pin);
+    s16_t a0 = getADC0();
+    float brakesMapped = getBrakesMapped();
+    int a1 = getADC1();
     String walkModeStr = walkMode ? "Walk" : "Ride";
+    int b1 = (int)digitalRead(toggle1Pin);
+    int b3 = (int)digitalRead(toggle3Pin);
+    String b1str = b1 ? "On" : "Off";
+    String b3str = b3 ? "On" : "Off";
+    String motorStateStr = isCtrlAlive ? "Vesc" : "novesc";
+    String motorBrakeStr = motorBrakeMode ? "MBrake" : "NoMBrk";
     bikeDisplay.displayEightParams(
-        String("A:") + String(rCapteur.value, 1),
+        String("A:") + etatsStr[etat],
         String("B:") + String(valeurCapteur, 2),
-        String("C:") + String(vescTelemetry.rpm, 0),
+        String("C:") + motorStateStr,
         String("D:") + walkModeStr,
-        String("E:") + String(vescTelemetry.current, 1),
-        String("F:") + String(vescTelemetry.duty, 2),
-        String("G:") + String(vescTelemetry.tempMosfet, 1),
-        String("H:") + String(vescTelemetry.tempMotor, 1));
+        String("E:") + String(vescTelemetry.rpm, 3),
+        String("F:") + String(vescTelemetry.voltage, 2),
+        String("G:") + String(brakesMapped, 2),
+        String("H:") + String(vescTelemetry.tachometer));
   }
 }
-
 void updateVescTelemetry()
 {
   if (vesc.getValues())
   {
+    isCtrlAlive = true;
     vescResponsive = true;
     vescTelemetry.rpm = vesc.getRPM();
     vescTelemetry.voltage = vesc.getVoltage();
@@ -607,10 +626,15 @@ void updateVescTelemetry()
   {
 
     // bikeDisplay.displayMessage("VESC not responsive");
+    vescResponsive = false;
+    isCtrlAlive = false;
 
+    if (debugMotor)
+    {
+      isCtrlAlive = true;
+    }
     if (debug)
     {
-      vescResponsive = false;
       Serial.println("Failed to get VESC values");
     }
   }
@@ -628,7 +652,8 @@ int InitializeStrengthSensor()
     {
       // capteur
       capteur.begin();
-      if (capteur.start())
+      // true pour tare
+      if (capteur.start(/*true*/))
       {
         Serial.println("Initialisation du capteur bien réussie");
         capteurInitialise = 1;
@@ -645,17 +670,14 @@ int InitializeStrengthSensor()
   else
     return 1;
 }
-void test2()
-{
-  Serial.println("Test 2 function called");
-}
+
 int initializeVesc()
 {
   bikeDisplay.displayMessage("Initializing VESC");
   delay(300);
   Serial2.setRX(serial2RX);
   Serial2.setTX(serial2TX);
-  Serial2.setFIFOSize(128);
+  Serial2.setFIFOSize(256);
   Serial2.begin(115200);
 
   delay(1000);
@@ -763,35 +785,35 @@ bool transition12()
 }
 bool transition15()
 {
-  return (etat == ATTENTE && valeurCapteur < brakeThreshold || chronoFrein.elapsed() > t1 && isCtrlAlive);
+  return (etat == ATTENTE && (valeurCapteur < brakeThreshold || getBrakesMapped() > brakeThumbThrottleThreshold) && isCtrlAlive);
 }
 bool transition23()
 {
-  return (etat == ROULE && (valeurCapteur < 0.5 || chronoFrein.elapsed() > t1) && vitesseMoyenne > 0 && isCtrlAlive);
+  return (etat == ROULE && (valeurCapteur < 0.5 /*|| chronoFrein.elapsed() > t1*/) && vitesseMoyenne > 0 && isCtrlAlive);
 }
 bool transition32()
 {
-  return (etat == STATU_QUO && valeurCapteur > alpha && !chronoFrein.isRunning() && isCtrlAlive);
+  return (etat == STATU_QUO && valeurCapteur > alpha /*&& !chronoFrein.isRunning()*/ && isCtrlAlive);
 }
 bool transition34()
 {
-  return (etat == STATU_QUO && (valeurCapteur < beta && valeurCapteur > brakeThreshold) || chronoFrein.elapsed() > t2 && isCtrlAlive);
+  return (etat == STATU_QUO && (valeurCapteur < beta && valeurCapteur > brakeThreshold) /*|| chronoFrein.elapsed() > t2 */ && isCtrlAlive);
 }
 bool transition42()
 {
-  return (etat == DECCELERATION && valeurCapteur > alpha && !chronoFrein.isRunning() && isCtrlAlive);
+  return (etat == DECCELERATION && valeurCapteur > alpha /* && !chronoFrein.isRunning() */ && isCtrlAlive);
 }
 bool transition45()
 {
-  return (etat == DECCELERATION && valeurCapteur < brakeThreshold || chronoFrein.elapsed() > t3 && isCtrlAlive);
+  return (etat == DECCELERATION && valeurCapteur < brakeThreshold /*|| chronoFrein.elapsed() > t3*/ && isCtrlAlive);
 }
 bool transition52()
 {
-  return (etat == FREINAGE && (valeurCapteur > 2 * alpha || (valeurCapteur > alpha && vitesseMoyenne < 1.0)) && !chronoFrein.isRunning() && isCtrlAlive && !motorBrakeMode);
+  return (etat == FREINAGE && (valeurCapteur > 2 * alpha || (valeurCapteur > alpha && vitesseMoyenne < 1.0)) /*&& !chronoFrein.isRunning()*/ && isCtrlAlive && !motorBrakeMode);
 }
 bool transition51()
 {
-  return (etat == FREINAGE && !chronoFrein.isRunning() && vitesseMoyenne < 1.0 && valeurCapteur >= 0.0 && valeurCapteur < alpha && isCtrlAlive && !motorBrakeMode);
+  return (etat == FREINAGE /*&& !chronoFrein.isRunning()*/ && vitesseMoyenne < 1.0 && valeurCapteur >= 0.0 && valeurCapteur < alpha && isCtrlAlive && !motorBrakeMode);
 }
 bool transition70()
 {
@@ -804,7 +826,15 @@ bool transition0()
 
 bool transition5()
 {
-  return (isCtrlAlive && (motorBrakeMode || valeurCapteur < brakeThreshold));
+  if (debug)
+  {
+    Serial.print("Transition 5: ");
+    Serial.print(valeurCapteur);
+    Serial.print(" <? ");
+    Serial.println(brakeThreshold);
+  }
+
+  return (isCtrlAlive && (motorBrakeMode || valeurCapteur < brakeThreshold || getBrakesMapped() > brakeThumbThrottleThreshold));
 }
 
 // Display debug info on the OLED screen (tiny screen, keep it short)

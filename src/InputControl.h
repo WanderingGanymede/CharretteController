@@ -19,4 +19,11 @@ extern bool buttonAPrevState, buttonBPrevState, buttonCPrevState;
 void setupInputControl();
 void InputControlHandler();
 
+// ADC input handling for Pi Pico
+extern int adc0Value;
+extern int adc1Value;
+void readADCInputs();
+int getADC0();
+int getADC1();
+float getBrakesMapped(float in_min = 280, float in_max = 785, float out_min = 0, float out_max = 1);
 #endif
