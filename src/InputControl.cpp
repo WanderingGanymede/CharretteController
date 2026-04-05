@@ -132,6 +132,7 @@ int adc1Value = 0;
 void readADCInputs()
 {
     adc0Value = analogRead(adc0Pin); // ADC0 is GPIO26
+
     adc1Value = analogRead(adc1Pin); // ADC1 is GPIO27
 }
 

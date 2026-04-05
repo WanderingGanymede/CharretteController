@@ -43,7 +43,7 @@ float maxLoadCellValue = 0;
 bool debugPython = 0;  // pour envoyer les données au format attendu par le script python
 bool debug = 0;        // pour envoyer les données de debug au format texte dans le moniteur série
 bool debugCsv = 0;     // pour envoyer les données de debug au format csv dans le moniteur série
-bool debugMotor = 1;   // si aucun moteur n'est branché, pour le simuler
+bool debugMotor = 0;   // si aucun moteur n'est branché, pour le simuler
 bool debugFrein = 0;   // si aucun interrupteur n'est branché, sur le frein à inertie. Inutilisé actuellement
 bool debugCapteur = 0; // si aucun capteur de force n'est branché, pour le simuler
 bool debugOther = 0;   // utilisé à des fins de tests.
@@ -56,7 +56,7 @@ int csvIter = 0;       // compteur d'itération pour l'affichage csv
 
 const int HX711_dout = 20; // mcu > HX711 dout pin
 const int HX711_sck = 21;  // mcu > HX711 sck pin
-double capteur_offset = 838 / 2.5f;
+double capteur_offset = 838.6 / 2.5f;
 float capteur_calibration = 25000;
 StrengthSensor capteur(HX711_dout, HX711_sck, capteur_offset, capteur_calibration, 0.5f);
 // pour calculer la dérivée du capteur de force. Inutilisé
@@ -64,7 +64,10 @@ DifferentialFilter<double, unsigned long> diffCapteur;
 Reading<double, unsigned long> rCapteur;
 Reading<Differential<double>, unsigned long> dCapteur;
 
-double valeurCapteur;
+double valeurCapteurInstant;
+
+MovingAverageFilter<double, double> valeurCapteurFiltered(10);
+double valeurCapteurMoyenne;
 bool newDataReady = 0;
 bool capteurInitialise = 0;
 Chrono resetOffsetChrono;                             // Chrono pour ?
@@ -72,6 +75,8 @@ int resetOffsetIter;                                  // compteur pour compter l
 MovingAverageFilter<double, double> movingOffset(16); // moyenne lissée sur 16 valeurs
 double newOffset, rawValue;
 
+bool capteurResponsive = false;
+long capteurTimeout = 2000;
 const int calVal_eepromAdress = 0;
 
 ///
@@ -123,25 +128,32 @@ const int sclWire1 = 11;
 
 // Paramètres à changer:
 
-double K1[3] = {1, 4, 0.1}; // boost, mode 0 pour les led
-double K2[3] = {1, 2, 0.1}; // marche, mode 1 pour les led
-float betaTab[2] = {-6, -3};
-float gammaTab[2] = {-10, -6};
-double consigneCapteurTab[2] = {-2.0, 0.0};
+double K1[3] = {1, 3, 0.125}; // boost, mode 0 pour les led
+double K2[3] = {1, 2, 0.1};   // marche, mode 1 pour les led
+float betaTab[2] = {-4, -3};
+float gammaTab[2] = {-8, -6};
+double consigneCapteurTab[2] = {-0.1, 0.0};
 
-double sortieMoteur;                            // output
+double sortieMoteurAccel;                       // output
 double consigneCapteur = consigneCapteurTab[1]; // setpoint, valeur visée par le PID comme valeur de capteur.
-float pwmMin = 110, pwmMax = 255;               // les valeurs minimales et maximales pour le PWM de la gachette.
-                                                // 110 a été trouvée expérimentalement avec une batterie 48V et un contrôleur Ozo. En deça la roue ne tourne pas.
-                                                // ces valeurs sont à tester et corriger en cas de changement de batterie ou contrôleur.
+                                                // les valeurs minimales et maximales pour le PWM de la gachette.
+// 110 a été trouvée expérimentalement avec une batterie 48V et un contrôleur Ozo. En deça la roue ne tourne pas.
+// ces valeurs sont à tester et corriger en cas de changement de batterie ou contrôleur.gvgv
 
-PID mainPID(&valeurCapteur, &sortieMoteur, &consigneCapteur, K1[0], K1[1], K1[2], P_ON_E, REVERSE);
+/// KNOBS
+float minCurrent = 1.5, maxCurrent = 30;
+
+float minBrakeCurrent = 0, maxBrakeCurrent = 50;
+
+int pidDir = REVERSE;
+
+PID mainPID(&valeurCapteurMoyenne, &sortieMoteurAccel, &consigneCapteur, K1[0], K1[1], K1[2], P_ON_E, pidDir);
 // Entrée: ValeurCapteur
 // Valeur asservie: SortieMoteur, qui est un PWM allant de pwmMin à pwmMax
 // ConsigneCapteur: Valeur visée pour ValeurCapteur
 // Kp,Ki,Kd, les paramètres dont dépendent l'asservissement du pwm
-// P_ON_E, Proportionnal on Error
-// REVERSE, augmenter la valeur asservie, diminuera l'entrée.
+// P_ON_E, Proportionnal on Erroruuu
+// REVERSE, augmenter la valeur asservie, diminuera l'entrée.uuuuuuasuuu
 //
 /////////////////////////////////////////////////
 //////////////// Etats //////////////////////////
@@ -163,14 +175,14 @@ int etat = INITIALISATION;
 
 static String etatsStr[] = {"INIT", "ATT", "ROULE", "S_QUO", "DECEL", "FREIN", "MARCHE", "RESET"};
 // Ancre paramètre 2
-
+float rollSpeedThreshold = 1;
 float alpha = 1;                    // seuil au dessus duquel le PID se calcule et se lance
 float beta = betaTab[0];            // seuil en deça duquel on passe sur déccélération (pwm=0, pid manual)
 float brakeThreshold = gammaTab[0]; // seuil en deça duquel on passe sur du freinage
 
 /////////////////////////////////////////////////
 //////////// Vitesse moyenne ////////////////////
-/////////////////////////////////////////////////
+/////////////////////////////////////////////////gvgv
 
 /*
  * Stockage de la vitesse du moteur.
@@ -178,11 +190,16 @@ float brakeThreshold = gammaTab[0]; // seuil en deça duquel on passe sur du fre
  * En cas de défaillance de cette information, le système n'est plus utilisable
  */
 
-// TODO lire la vitesse depuis le VESC A la place
-
 MovingAverageFilter<double, double> vitesseFiltree(4);
 double vitesseMoyenne;
 double vitesseInstantanee;
+
+// in mm
+float wheelDiam = 550;
+// motor poles pair
+
+int polePairs = 50;
+
 /////////////////////////////////////////////////
 /////////////// Frein à inertie /////////////////
 /////////////////////////////////////////////////
@@ -199,11 +216,11 @@ double vitesseInstantanee;
 
 const int frein = debugFrein ? 4 : 5;
 // Chrono chronoFrein;
-bool freinFlag = 0;
+/*bool freinFlag = 0;
 int t1 = 300;
 int t2 = 1000;
 int t3 = 1500;
-
+*/
 ////gachette frein
 
 float brakeThumbThrottleThreshold = 0.03; // Seuil au delà duquel on considère que la gachette de frein est actionnée
@@ -255,7 +272,8 @@ void setup()
 
   // PID
   mainPID.SetMode(MANUAL);
-  mainPID.SetOutputLimits(pwmMin, pwmMax);
+  // mainPID.SetOutputLimits(pwmMin, pwmMax);
+  mainPID.SetOutputLimits(minCurrent, maxCurrent);
   mainPID.SetSampleTime(200);
 
   // Controleur
@@ -281,14 +299,27 @@ void setup()
 
 void loop()
 {
+
+  // vitesseMoyenne = 2;
   InputControlHandler();
+  static long lastCapteurUpdate = 0;
   // Call the toggle handler to check for toggle presses
   if (capteurInitialise)
   {
-    capteur.update(&newDataReady, &valeurCapteur);
-    rCapteur.value = valeurCapteur * 1000;
-    rCapteur.timestamp += millis() / 1000;
-    diffCapteur.push(&rCapteur, &dCapteur);
+    capteur.update(&newDataReady, &valeurCapteurInstant);
+    if (newDataReady)
+    {
+      capteurResponsive = true;
+      lastCapteurUpdate = millis();
+      valeurCapteurFiltered.push(&valeurCapteurInstant, &valeurCapteurMoyenne);
+      rCapteur.value = valeurCapteurInstant * 1000;
+      rCapteur.timestamp += millis() / 1000;
+      diffCapteur.push(&rCapteur, &dCapteur);
+    }
+  }
+  if (millis() - lastCapteurUpdate > capteurTimeout)
+  {
+    capteurResponsive = false;
   }
 
   // Update VESC telemetry every vescUpdateInterval ms
@@ -333,7 +364,7 @@ void loop()
   {
 
     // moteur.setMoteurState(STOPPED);
-    sortieMoteur = 0;
+    sortieMoteurAccel = 0;
     capteur.setThresholdSensor(0.5);
     // switchCtrl(powerCtrl);
 
@@ -372,7 +403,7 @@ void loop()
 
     mainPID.SetMode(MANUAL);
     // moteur.setMoteurState(STOPPED);
-    sortieMoteur = 0;
+    sortieMoteurAccel = 0;
     capteur.setThresholdSensor(0.5);
 
     // En mode 1, on arrête le chrono et remet à 0 les itérations pour interdire le reset capteur.
@@ -406,7 +437,8 @@ void loop()
   {
     // moteur.setMoteurState(SPINNING);
     mainPID.SetMode(AUTOMATIC);
-    // miseAJourPID();
+    miseAJourPID();
+
     // if (!flowingChrono.isRunning())
     //{
     // flowingChrono.restart(); //
@@ -420,6 +452,8 @@ void loop()
     {
       etat = FREINAGE;
     }
+    else if (transition21())
+      etat = ATTENTE;
     else if (transition0())
       etat = INITIALISATION;
     else if (transition23())
@@ -443,6 +477,8 @@ void loop()
     }
     else if (transition0())
       etat = INITIALISATION;
+    else if (transition31())
+      etat = ATTENTE;
     else if (transition32())
       etat = ROULE;
     else if (transition34())
@@ -458,7 +494,7 @@ void loop()
 
     // moteur.setMoteurState(STOPPED);
     mainPID.SetMode(MANUAL);
-    sortieMoteur = 0;
+    sortieMoteurAccel = 0;
 
     if (transition5())
     {
@@ -467,9 +503,9 @@ void loop()
     else if (transition0())
       etat = INITIALISATION;
     else if (transition42())
-      etat = ROULE;
-    // c'était en état == ATTENTE, càd  état 1. Pourquoi?
-    //  etat = ATTENTE;
+      // etat = ROULE;
+      // c'était en état == ATTENTE, càd  état 1. Pourquoi?
+      etat = ATTENTE;
     else if (transition45())
       etat = FREINAGE;
   }
@@ -483,7 +519,7 @@ void loop()
 
     mainPID.SetMode(MANUAL);
     // moteur.setMoteurState(BRAKING);
-    sortieMoteur = 0;
+    sortieMoteurAccel = 0;
     capteur.setThresholdSensor(0.5);
 
     // En mode 5, on arrête le chrono et remet à 0 les itérations pour interdire le reset capteur.
@@ -503,10 +539,10 @@ void loop()
     }
     else if (transition0())
       etat = INITIALISATION;
-    else if (transition52())
-      etat = ROULE;
     else if (transition51())
       etat = ATTENTE;
+    else if (transition52())
+      etat = ROULE;
   }
 
   ////////////////////////////////////////////////////:
@@ -549,8 +585,16 @@ void loop()
 
   // --- Test: Display 8 parameters in 4 rows ---
   static unsigned long lastParamTest = 0;
+  static int n = 0;
+  static int displayAorB = 0;
   if (millis() - lastParamTest > 200)
   {
+    n = n + 1;
+    if (n >= 10)
+    {
+      displayAorB = 1 - displayAorB;
+      n = 0;
+    }
     readADCInputs();
     lastParamTest = millis();
     int b2 = (int)digitalRead(toggle2Pin);
@@ -559,22 +603,96 @@ void loop()
     int a1 = getADC1();
     String walkModeStr = walkMode ? "Walk" : "Ride";
     int b1 = (int)digitalRead(toggle1Pin);
-    int b3 = (int)digitalRead(toggle3Pin);
+    int b3 = toggle3State;
     String b1str = b1 ? "On" : "Off";
-    String b3str = b3 ? "On" : "Off";
+    String b3str = b3 ? "Off" : "On";
     String motorStateStr = isCtrlAlive ? "Vesc" : "novesc";
     String motorBrakeStr = motorBrakeMode ? "MBrake" : "NoMBrk";
+    float actualBrakeCurrent = fmap(brakesMapped, 0.0, 1.0, minBrakeCurrent, maxBrakeCurrent);
+    actualBrakeCurrent = actualBrakeCurrent * (-1);
+
+    String cstr = displayAorB ? b3str : motorStateStr;
     bikeDisplay.displayEightParams(
         String("A:") + etatsStr[etat],
-        String("B:") + String(valeurCapteur, 2),
-        String("C:") + motorStateStr,
+        String("B:") + String(valeurCapteurMoyenne, 2),
+        String("C:") + cstr,
         String("D:") + walkModeStr,
-        String("E:") + String(vescTelemetry.rpm, 3),
-        String("F:") + String(vescTelemetry.voltage, 2),
-        String("G:") + String(brakesMapped, 2),
-        String("H:") + String(vescTelemetry.tachometer));
+        String("E:") + String(brakesMapped, 2),
+        String("F:") + String(vitesseMoyenne, 2),
+
+        String("G:") + String(sortieMoteurAccel, 2),
+        String("H:") + String(actualBrakeCurrent, 2));
+  }
+  // send commands to VESC every 50ms
+
+  static unsigned long lastCommandSent = 0;
+  if (millis() - lastCommandSent > 50)
+  {
+
+    sendVescCommands();
+    lastCommandSent = millis();
   }
 }
+
+// TODO envoi des instructions au vesc
+void sendVescCommands()
+{
+  // blocage manuel au bouton
+  if (toggle3State == 1)
+  {
+    // vesc.setCurrent(0);
+    //  vesc.setBrake(maxBrakeCurrent);
+
+    if (etat == DECCELERATION || etat == FREINAGE)
+    {
+      float brakesMapped = getBrakesMapped();
+      float actualBrakeCurrent = fmap(brakesMapped, 0, 1, minBrakeCurrent, maxBrakeCurrent);
+      vesc.setBrake(actualBrakeCurrent * (-1));
+      // vesc.setCurrent(0);
+    }
+    else
+    {
+      vesc.setCurrent(0);
+    }
+    return;
+  }
+  if (!capteurResponsive)
+  {
+    vesc.setCurrent(0);
+    return;
+  }
+
+  if (isCtrlAlive)
+  {
+    if (etat == ROULE || etat == STATU_QUO)
+    {
+
+      if (sortieMoteurAccel > 0)
+      {
+        vesc.setCurrent(sortieMoteurAccel);
+      }
+      else
+      {
+
+        vesc.setBrake(sortieMoteurAccel);
+      }
+    }
+    // vesc.setBrake(0);
+    else if (etat == DECCELERATION || etat == FREINAGE)
+    {
+      float brakesMapped = getBrakesMapped();
+      float actualBrakeCurrent = fmap(brakesMapped, 0, 1, minBrakeCurrent, maxBrakeCurrent);
+      vesc.setBrake(actualBrakeCurrent * (-1));
+      // vesc.setCurrent(0);
+    }
+  }
+  else
+  {
+    // pas tres util Vu Q'uon est deco
+    vesc.setCurrent(0);
+  }
+}
+
 void updateVescTelemetry()
 {
   if (vesc.getValues())
@@ -720,7 +838,8 @@ void setMode(int mode)
     consigneCapteur = consigneCapteurTab[1];
     beta = betaTab[1];
     brakeThreshold = gammaTab[1];
-    mainPID.SetOutputLimits(pwmMin, pwmMax);
+    // mainPID.SetOutputLimits(pwmMin, pwmMax);
+    mainPID.SetOutputLimits(minCurrent, maxCurrent);
   }
   else
   {
@@ -728,7 +847,9 @@ void setMode(int mode)
     beta = betaTab[0];
     brakeThreshold = gammaTab[0];
     consigneCapteur = consigneCapteurTab[0];
-    mainPID.SetOutputLimits(pwmMin, pwmMax);
+    // mainPID.SetOutputLimits(pwmMin, pwmMax);
+
+    mainPID.SetOutputLimits(minCurrent, maxCurrent);
   }
 
   setPIDMode(walkMode);
@@ -745,8 +866,11 @@ void miseAJourVitesse()
   }
   else
   {
+    float wheelRpm = (float)vescTelemetry.rpm / (float)polePairs;   // Vitesse de la roue en rpm
+    float wheelCircumference = 3.14159 * (float)wheelDiam / 1000.0; // circonférence de la roue en m
+    float vitesseMps = (wheelRpm * wheelCircumference) / 60.0;      // vitesse en m/s
+    vitesseInstantanee = vitesseMps * 3.6;
 
-    vitesseInstantanee = vescTelemetry.tachometer;
     vitesseFiltree.push(&vitesseInstantanee, &vitesseMoyenne);
   }
 }
@@ -773,7 +897,7 @@ bool transition01()
 {
   // Serial.print("transition 01"); Serial.print(" - "); Serial.print(etat == INITIALISATION); Serial.print(" - "); Serial.print(initialisationCapteur()); Serial.print(" - "); Serial.print(vitesseMoyenne < 1.0); Serial.print(" - "); Serial.print(isCtrlAlive);
   // Serial.println();
-  return (etat == INITIALISATION && InitializeStrengthSensor() && vitesseMoyenne < 1.0 && isCtrlAlive);
+  return (etat == INITIALISATION && InitializeStrengthSensor() && vitesseMoyenne < rollSpeedThreshold && isCtrlAlive);
 }
 bool transition07()
 {
@@ -781,39 +905,49 @@ bool transition07()
 }
 bool transition12()
 {
-  return (etat == ATTENTE && valeurCapteur > alpha && vitesseMoyenne > 1.0 && isCtrlAlive);
+  return (etat == ATTENTE && valeurCapteurMoyenne > alpha && vitesseMoyenne > rollSpeedThreshold && isCtrlAlive);
 }
 bool transition15()
 {
-  return (etat == ATTENTE && (valeurCapteur < brakeThreshold || getBrakesMapped() > brakeThumbThrottleThreshold) && isCtrlAlive);
+  return (etat == ATTENTE && (valeurCapteurMoyenne < brakeThreshold || getBrakesMapped() > brakeThumbThrottleThreshold) && isCtrlAlive);
+}
+bool transition21()
+{
+  return (etat == ROULE && vitesseMoyenne < rollSpeedThreshold && valeurCapteurMoyenne < alpha && isCtrlAlive);
 }
 bool transition23()
 {
-  return (etat == ROULE && (valeurCapteur < 0.5 /*|| chronoFrein.elapsed() > t1*/) && vitesseMoyenne > 0 && isCtrlAlive);
+  return (etat == ROULE && (valeurCapteurMoyenne < 0.5 /*|| chronoFrein.elapsed() > t1*/) && vitesseMoyenne > 0 && isCtrlAlive);
+}
+
+bool transition31()
+{
+  return (etat == STATU_QUO && vitesseMoyenne < rollSpeedThreshold && valeurCapteurMoyenne < alpha && isCtrlAlive);
 }
 bool transition32()
 {
-  return (etat == STATU_QUO && valeurCapteur > alpha /*&& !chronoFrein.isRunning()*/ && isCtrlAlive);
+  return (etat == STATU_QUO && valeurCapteurMoyenne > alpha /*&& !chronoFrein.isRunning()*/ && isCtrlAlive);
 }
+
 bool transition34()
 {
-  return (etat == STATU_QUO && (valeurCapteur < beta && valeurCapteur > brakeThreshold) /*|| chronoFrein.elapsed() > t2 */ && isCtrlAlive);
+  return (etat == STATU_QUO && (valeurCapteurMoyenne < beta && valeurCapteurMoyenne > brakeThreshold) /*|| chronoFrein.elapsed() > t2 */ && isCtrlAlive);
 }
 bool transition42()
 {
-  return (etat == DECCELERATION && valeurCapteur > alpha /* && !chronoFrein.isRunning() */ && isCtrlAlive);
+  return (etat == DECCELERATION && valeurCapteurMoyenne > alpha /* && !chronoFrein.isRunning() */ && isCtrlAlive);
 }
 bool transition45()
 {
-  return (etat == DECCELERATION && valeurCapteur < brakeThreshold /*|| chronoFrein.elapsed() > t3*/ && isCtrlAlive);
+  return (etat == DECCELERATION && valeurCapteurMoyenne < brakeThreshold /*|| chronoFrein.elapsed() > t3*/ && isCtrlAlive);
 }
 bool transition52()
 {
-  return (etat == FREINAGE && (valeurCapteur > 2 * alpha || (valeurCapteur > alpha && vitesseMoyenne < 1.0)) /*&& !chronoFrein.isRunning()*/ && isCtrlAlive && !motorBrakeMode);
+  return (etat == FREINAGE && getBrakesMapped() < brakeThumbThrottleThreshold /*&& (valeurCapteurMoyenne > 2 * alpha || (valeurCapteurMoyenne > alpha && vitesseMoyenne < 1.0)) /*&& !chronoFrein.isRunning()*/ && isCtrlAlive && !motorBrakeMode);
 }
 bool transition51()
 {
-  return (etat == FREINAGE /*&& !chronoFrein.isRunning()*/ && vitesseMoyenne < 1.0 && valeurCapteur >= 0.0 && valeurCapteur < alpha && isCtrlAlive && !motorBrakeMode);
+  return (etat == FREINAGE && getBrakesMapped() < brakeThumbThrottleThreshold /*&& !chronoFrein.isRunning()*/ && vitesseMoyenne < rollSpeedThreshold && valeurCapteurMoyenne < alpha && isCtrlAlive && !motorBrakeMode);
 }
 bool transition70()
 {
@@ -829,12 +963,12 @@ bool transition5()
   if (debug)
   {
     Serial.print("Transition 5: ");
-    Serial.print(valeurCapteur);
+    Serial.print(valeurCapteurMoyenne);
     Serial.print(" <? ");
     Serial.println(brakeThreshold);
   }
 
-  return (isCtrlAlive && (motorBrakeMode || valeurCapteur < brakeThreshold || getBrakesMapped() > brakeThumbThrottleThreshold));
+  return (isCtrlAlive && (motorBrakeMode || valeurCapteurMoyenne < brakeThreshold || getBrakesMapped() > brakeThumbThrottleThreshold));
 }
 
 // Display debug info on the OLED screen (tiny screen, keep it short)
