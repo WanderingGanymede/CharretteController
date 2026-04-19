@@ -1,8 +1,7 @@
 // ...existing code...
-#include <WiFiEspAT.h>
+#include "WifiLogger.h"
 
 
-#define ESP_SERIAL Serial1
 #include "utils.h"
 #include "config.h"
 #include "StrengthSensor.h"
@@ -28,6 +27,10 @@ int myFunction(int, int);
 #if defined(ESP8266) || defined(ESP32) || defined(AVR)
 #include <EEPROM.h>
 #endif
+
+// WiFi logger — SoftAP + TCP server via ESP8285 on Serial1
+WifiLogger wifiLogger("PicoTrailer", "12345678");
+
 
 float minLoadCellValue = 0;
 float maxLoadCellValue = 0;
@@ -300,18 +303,21 @@ void setup()
   Serial.println();
   bikeDisplay.displayMessage("Starting Charr");
   Serial.println("Starting Charrette yo...");
-  // Set the Bluetooth device name BEFORE calling begin()
-  SerialBT.setName("TrailerController");
-  delay(1000);
-  // Initialize Bluetooth Serial with default baud rate (115200)
-  SerialBT.begin(115200);
 
-  bikeDisplay.displayMessage("BT ok");
-  Serial.println("Bluetooth is ready to pair!");
+  // WiFi logger — ESP8285 on Serial1 (RX=1, TX=0)
+  Serial1.setRX(serial1RX);
+  Serial1.setTX(serial1TX);
+  Serial1.begin(115200);
+  if (wifiLogger.begin(Serial1)) {
+    bikeDisplay.displayMessage("WiFi AP OK");
+  } else {
+    bikeDisplay.displayMessage("WiFi FAIL");
+  }
 }
 
 void loop()
 {
+  wifiLogger.update();
 
   // vitesseMoyenne = 2;
   InputControlHandler();
@@ -636,10 +642,21 @@ void loop()
         String("G:") + String(sortieMoteurAccel, 2),
         String("H:") + String(actualBrakeCurrent, 2));
 
-
-        SerialBT.print("Weight: ");
-        SerialBT.print(valeurCapteurMoyenne, 2);
-        SerialBT.println(" kg"); // Using println for a new line
+    // --- WiFi telemetry log (CSV, 200 ms cadence) ---
+    String csvLine =
+        String(millis())                 + "," +
+        etatsStr[etat]                   + "," +
+        String(valeurCapteurMoyenne, 2)  + "," +
+        String(vitesseMoyenne, 2)        + "," +
+        String(sortieMoteurAccel, 2)     + "," +
+        String(brakesMapped, 3)          + "," +
+        String(actualBrakeCurrent, 2)    + "," +
+        String(vescTelemetry.rpm, 0)     + "," +
+        String(vescTelemetry.voltage, 1) + "," +
+        String(vescTelemetry.current, 2) + "," +
+        String(vescTelemetry.duty, 3)    + "," +
+        String(vescTelemetry.tempMosfet, 1);
+    wifiLogger.log(csvLine);
   }
   // send commands to VESC every 50ms
 
