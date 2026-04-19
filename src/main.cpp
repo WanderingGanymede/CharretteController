@@ -93,8 +93,6 @@ const int calVal_eepromAdress = 0;
 /////////////////////////////////////////////////
 /////////////////// VESC /////////////////////////
 /////////////////////////////////////////////////
-const int serial1RX = 1;
-const int serial1TX = 0;
 const int serial2RX = 5;
 const int serial2TX = 4;
 Vesc vesc;
@@ -324,8 +322,6 @@ void setup()
   Serial.println("Starting Charrette yo...");
 
   // WiFi logger — ESP8285 on Serial1 (RX=1, TX=0)
-  Serial1.setRX(serial1RX);
-  Serial1.setTX(serial1TX);
   Serial1.begin(115200);
   if (wifiLogger.begin(Serial1)) {
     bikeDisplay.displayMessage("WiFi AP OK");
