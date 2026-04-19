@@ -1,5 +1,5 @@
 // ...existing code...
-#include <WiFiEspAT.h>
+//#include <WiFiEspAT.h>
 
 
 #define ESP_SERIAL Serial1
@@ -252,15 +252,17 @@ bool motorBrakeMode = 0;
 
 void setup()
 {
-  Serial.begin(9600);
-  delay(500);
+  Serial.begin(115200);
+  while (!Serial && millis() < 5000);
   Serial.println("###################");
   Serial.println("## version 0.1: ");
   Serial.println("## date: : ");
   Serial.println("## Boulanger ");
   Serial.println("###################");
 
+  Serial.println(F("[setup] Input control..."));
   setupInputControl();
+  Serial.println(F("[setup] Input control OK"));
   /*
     On a un nouveau boîtier de contrôle.
     Le mode est lu en fonction de analogRead sur walkPin.
@@ -271,43 +273,48 @@ void setup()
 
   */
   // kkinterrupteur sur la carte
+  Serial.println(F("[setup] Buttons pinMode..."));
   pinMode(plus, INPUT_PULLUP);
   pinMode(moins, INPUT_PULLUP);
   pinMode(halt, INPUT_PULLUP);
+  Serial.println(F("[setup] Buttons OK"));
 
   // PID
+  Serial.println(F("[setup] PID init..."));
   mainPID.SetMode(MANUAL);
-  // mainPID.SetOutputLimits(pwmMin, pwmMax);
   mainPID.SetOutputLimits(minCurrent, maxCurrent);
   mainPID.SetSampleTime(200);
+  Serial.println(F("[setup] PID OK"));
 
   // Controleur
+  Serial.println(F("[setup] Controller pins..."));
   pinMode(ctrlAlive, INPUT);
   pinMode(ctrlSwitch, OUTPUT);
-
   digitalWrite(ctrlSwitch, false);
+  Serial.println(F("[setup] Controller pins OK"));
+
+  Serial.println(F("[setup] Waiting 1s..."));
   delay(1000);
+  Serial.println(F("[setup] Wire1 + display init..."));
   Wire1.setSDA(sdaWire1);
   Wire1.setSCL(sclWire1);
   Wire1.begin();
+  Serial.println(F("[setup] Wire1 OK"));
   bikeDisplay.begin();
   bikeDisplay.displayMessage("Bike Display Ready");
+  Serial.println(F("[setup] Display OK"));
   delay(1000);
 
+  Serial.println(F("[setup] VESC init..."));
   initializeVesc();
+  Serial.println(F("[setup] VESC init done, waiting 2s..."));
   delay(2000);
+  Serial.println(F("[setup] Strength sensor init..."));
   InitializeStrengthSensor();
-  Serial.println();
-  bikeDisplay.displayMessage("Starting Charr");
-  Serial.println("Starting Charrette yo...");
-  // Set the Bluetooth device name BEFORE calling begin()
-  SerialBT.setName("TrailerController");
-  delay(1000);
-  // Initialize Bluetooth Serial with default baud rate (115200)
-  SerialBT.begin(115200);
+  Serial.println(F("[setup] Strength sensor done"));
 
-  bikeDisplay.displayMessage("BT ok");
-  Serial.println("Bluetooth is ready to pair!");
+  bikeDisplay.displayMessage("Starting Charr");
+  Serial.println(F("[setup] Setup complete. Entering loop."));
 }
 
 void loop()
@@ -637,9 +644,6 @@ void loop()
         String("H:") + String(actualBrakeCurrent, 2));
 
 
-        SerialBT.print("Weight: ");
-        SerialBT.print(valeurCapteurMoyenne, 2);
-        SerialBT.println(" kg"); // Using println for a new line
   }
   // send commands to VESC every 50ms
 
