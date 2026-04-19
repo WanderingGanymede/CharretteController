@@ -1,4 +1,9 @@
 // ...existing code...
+#include <WiFiEspAT.h>
+
+
+#define ESP_SERIAL Serial1
+#include "utils.h"
 #include "config.h"
 #include "StrengthSensor.h"
 #include "Vesc.h"
@@ -293,8 +298,16 @@ void setup()
   delay(2000);
   InitializeStrengthSensor();
   Serial.println();
-  bikeDisplay.displayMessage("Starting Charrette");
+  bikeDisplay.displayMessage("Starting Charr");
   Serial.println("Starting Charrette yo...");
+  // Set the Bluetooth device name BEFORE calling begin()
+  SerialBT.setName("TrailerController");
+  delay(1000);
+  // Initialize Bluetooth Serial with default baud rate (115200)
+  SerialBT.begin(115200);
+
+  bikeDisplay.displayMessage("BT ok");
+  Serial.println("Bluetooth is ready to pair!");
 }
 
 void loop()
@@ -622,6 +635,11 @@ void loop()
 
         String("G:") + String(sortieMoteurAccel, 2),
         String("H:") + String(actualBrakeCurrent, 2));
+
+
+        SerialBT.print("Weight: ");
+        SerialBT.print(valeurCapteurMoyenne, 2);
+        SerialBT.println(" kg"); // Using println for a new line
   }
   // send commands to VESC every 50ms
 
