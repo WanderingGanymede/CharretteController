@@ -35,3 +35,7 @@ bool transition51();
 bool transition70();
 bool transition0();
 bool transition5();
+
+// Handle a command string received over WiFi TCP.
+// Parses "SET <key> <value>" and "GET ALL" and acts on the global PID/threshold params.
+void handleWifiCommand(const String& cmd);

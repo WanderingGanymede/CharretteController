@@ -13,6 +13,8 @@ pkgs.mkShell {
     # Helpful Utilities
     minicom         # Serial terminal for debugging output
     picotool        # For inspecting UF2 files and interacting with the Pico (optional, from nixpkgs)
+
+    (python3.withPackages (ps: with ps; [ matplotlib numpy tornado]))
   ];
 
   # Environment variables that many Pico projects expect

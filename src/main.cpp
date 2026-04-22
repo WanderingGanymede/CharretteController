@@ -32,6 +32,16 @@ int myFunction(int, int);
 // WiFi logger — SoftAP + TCP server via ESP8285 on Serial1
 WifiLogger wifiLogger("PicoTrailer", "12345678");
 
+// When true: stream every raw sensor sample (for noise analysis).
+// When false: send the full CSV telemetry line every 200 ms instead.
+bool wifiStreamSensor = true;
+
+// Sensor stream buffer — samples are accumulated here and flushed as one
+// AT+CIPSEND every SENSOR_FLUSH_MS milliseconds.
+static String        sensorBuffer    = "";
+static unsigned long lastSensorFlush = 0;
+const  unsigned long SENSOR_FLUSH_MS = 300;
+
 
 float minLoadCellValue = 0;
 float maxLoadCellValue = 0;
@@ -334,6 +344,22 @@ void loop()
 {
   wifiLogger.update();
 
+  // Send the CSV header to a freshly connected client.
+  // Done here rather than inside update() so that log() is never called
+  // from within the serial-parsing loop (which would block update() for
+  // up to 2 s and swallow incoming +IPD bytes).
+  if (wifiLogger.newClientConnected())
+    wifiLogger.log(String(WifiLogger::CSV_HEADER));
+
+  if (wifiLogger.hasCommand())
+  {
+    String cmd = wifiLogger.getCommand();
+    Serial.print(F("[loop] WiFi command received: '"));
+    Serial.print(cmd);
+    Serial.println(F("'"));
+    handleWifiCommand(cmd);
+  }
+
   // vitesseMoyenne = 2;
   InputControlHandler();
   static long lastCapteurUpdate = 0;
@@ -349,8 +375,29 @@ void loop()
       rCapteur.value = valeurCapteurInstant * 1000;
       rCapteur.timestamp += millis() / 1000;
       diffCapteur.push(&rCapteur, &dCapteur);
+
+      // Accumulate sensor data into a buffer; flushed every 300 ms below.
+      if (wifiStreamSensor)
+      {
+        sensorBuffer += String(F("S:"))
+          + String(millis())                + ","
+          + String(valeurCapteurInstant, 4) + ","
+          + String(valeurCapteurMoyenne, 4) + "\r\n";
+      }
     }
   }
+  // Flush the sensor buffer every 300 ms in one AT+CIPSEND call.
+  // Batching avoids a separate AT round-trip per sample and gives the
+  // control loop far more breathing room than calling logStream() at 10 Hz.
+  if (wifiStreamSensor
+      && sensorBuffer.length() > 0
+      && millis() - lastSensorFlush >= SENSOR_FLUSH_MS)
+  {
+    wifiLogger.log(sensorBuffer);
+    sensorBuffer     = "";
+    lastSensorFlush  = millis();
+  }
+
   if (millis() - lastCapteurUpdate > capteurTimeout)
   {
     capteurResponsive = false;
@@ -671,7 +718,13 @@ void loop()
         String(vescTelemetry.current, 2) + "," +
         String(vescTelemetry.duty, 3)    + "," +
         String(vescTelemetry.tempMosfet, 1);
-    wifiLogger.log(csvLine);
+    // Only send the full CSV telemetry when not in sensor-stream mode.
+    // Both use the same TCP connection so mixing them at different rates
+    // would interleave SEND OK responses and confuse the AT command flow.
+    if (!wifiStreamSensor)
+    {
+      wifiLogger.log(csvLine);
+    }
   }
   // send commands to VESC every 50ms
 
@@ -1019,6 +1072,249 @@ bool transition5()
   }
 
   return (isCtrlAlive && (motorBrakeMode || valeurCapteurMoyenne < brakeThreshold || getBrakesMapped() > brakeThumbThrottleThreshold));
+}
+
+// ---------------------------------------------------------------------------
+// handleWifiCommand()  — parse and act on commands received over WiFi TCP
+//
+// Supported commands:
+//   SET <key> <value>   — update a tunable parameter
+//   GET ALL             — dump all tunable parameters back to the client
+//
+// Keys:
+//   kp1 ki1 kd1         — PID tunings for boost/ride mode  (K1)
+//   kp2 ki2 kd2         — PID tunings for walk mode        (K2)
+//   alpha               — sensor threshold above which PID engages
+//   beta0  beta1        — decel threshold per mode
+//   gamma0 gamma1       — brake threshold per mode
+//   sp0    sp1          — PID setpoint (consigne) per mode
+//   minA   maxA         — motor current limits (A)
+//   minBrk maxBrk       — brake current limits (A)
+//   rollThr             — minimum speed to be considered "rolling" (km/h)
+//   brakeThr            — brake thumb-throttle dead-zone threshold
+// ---------------------------------------------------------------------------
+void handleWifiCommand(const String& cmd)
+{
+  Serial.print(F("[CMD] Handling: '"));
+  Serial.print(cmd);
+  Serial.println(F("'"));
+
+  // ---- SET <key> <value> ----
+  if (cmd.startsWith("SET "))
+  {
+    String rest = cmd.substring(4);
+    rest.trim();
+
+    int spaceIdx = rest.indexOf(' ');
+    if (spaceIdx == -1)
+    {
+      Serial.println(F("[CMD] ERR: SET needs a value (e.g. SET kp1 2.5)"));
+      wifiLogger.log(F("ERR SET requires: SET <key> <value>"));
+      return;
+    }
+
+    String key   = rest.substring(0, spaceIdx);
+    float  value = rest.substring(spaceIdx + 1).toFloat();
+    bool   found = true;
+
+    Serial.print(F("[CMD] SET "));
+    Serial.print(key);
+    Serial.print(F(" = "));
+    Serial.println(value, 4);
+
+    // --- PID tunings ---
+    if (key == "kp1")
+    {
+      K1[0] = value;
+      if (!walkMode) setPIDMode(walkMode);
+      Serial.println(F("[CMD]  -> K1[0] updated, PID re-tuned"));
+    }
+    else if (key == "ki1")
+    {
+      K1[1] = value;
+      if (!walkMode) setPIDMode(walkMode);
+      Serial.println(F("[CMD]  -> K1[1] updated, PID re-tuned"));
+    }
+    else if (key == "kd1")
+    {
+      K1[2] = value;
+      if (!walkMode) setPIDMode(walkMode);
+      Serial.println(F("[CMD]  -> K1[2] updated, PID re-tuned"));
+    }
+    else if (key == "kp2")
+    {
+      K2[0] = value;
+      if (walkMode) setPIDMode(walkMode);
+      Serial.println(F("[CMD]  -> K2[0] updated, PID re-tuned"));
+    }
+    else if (key == "ki2")
+    {
+      K2[1] = value;
+      if (walkMode) setPIDMode(walkMode);
+      Serial.println(F("[CMD]  -> K2[1] updated, PID re-tuned"));
+    }
+    else if (key == "kd2")
+    {
+      K2[2] = value;
+      if (walkMode) setPIDMode(walkMode);
+      Serial.println(F("[CMD]  -> K2[2] updated, PID re-tuned"));
+    }
+    // --- thresholds ---
+    else if (key == "alpha")
+    {
+      alpha = value;
+      Serial.println(F("[CMD]  -> alpha updated"));
+    }
+    else if (key == "beta0")
+    {
+      betaTab[0] = value;
+      if (!walkMode) beta = betaTab[0];
+      Serial.println(F("[CMD]  -> betaTab[0] updated"));
+    }
+    else if (key == "beta1")
+    {
+      betaTab[1] = value;
+      if (walkMode) beta = betaTab[1];
+      Serial.println(F("[CMD]  -> betaTab[1] updated"));
+    }
+    else if (key == "gamma0")
+    {
+      gammaTab[0] = value;
+      if (!walkMode) brakeThreshold = gammaTab[0];
+      Serial.println(F("[CMD]  -> gammaTab[0] updated"));
+    }
+    else if (key == "gamma1")
+    {
+      gammaTab[1] = value;
+      if (walkMode) brakeThreshold = gammaTab[1];
+      Serial.println(F("[CMD]  -> gammaTab[1] updated"));
+    }
+    // --- setpoints ---
+    else if (key == "sp0")
+    {
+      consigneCapteurTab[0] = value;
+      if (!walkMode) consigneCapteur = value;
+      Serial.println(F("[CMD]  -> consigneCapteurTab[0] updated"));
+    }
+    else if (key == "sp1")
+    {
+      consigneCapteurTab[1] = value;
+      if (walkMode) consigneCapteur = value;
+      Serial.println(F("[CMD]  -> consigneCapteurTab[1] updated"));
+    }
+    // --- current limits ---
+    else if (key == "minA")
+    {
+      minCurrent = value;
+      mainPID.SetOutputLimits(minCurrent, maxCurrent);
+      Serial.println(F("[CMD]  -> minCurrent updated, PID limits refreshed"));
+    }
+    else if (key == "maxA")
+    {
+      maxCurrent = value;
+      mainPID.SetOutputLimits(minCurrent, maxCurrent);
+      Serial.println(F("[CMD]  -> maxCurrent updated, PID limits refreshed"));
+    }
+    else if (key == "minBrk")
+    {
+      minBrakeCurrent = value;
+      Serial.println(F("[CMD]  -> minBrakeCurrent updated"));
+    }
+    else if (key == "maxBrk")
+    {
+      maxBrakeCurrent = value;
+      Serial.println(F("[CMD]  -> maxBrakeCurrent updated"));
+    }
+    // --- stream mode toggle ---
+    else if (key == "stream")
+    {
+      // SET stream 1  → sensor stream mode (raw samples via logStream)
+      // SET stream 0  → full CSV telemetry mode (200 ms cadence via log)
+      wifiStreamSensor = (value != 0.0f);
+      Serial.print(F("[CMD]  -> wifiStreamSensor = "));
+      Serial.println(wifiStreamSensor);
+      wifiLogger.log(wifiStreamSensor
+        ? "ACK stream SENSOR (raw samples, use graph.py)"
+        : "ACK stream CSV (200 ms telemetry)");
+      found = false; // suppress the generic ACK below — we already sent one
+    }
+    // --- speed / brake thresholds ---
+    else if (key == "rollThr")
+    {
+      rollSpeedThreshold = value;
+      Serial.println(F("[CMD]  -> rollSpeedThreshold updated"));
+    }
+    else if (key == "brakeThr")
+    {
+      brakeThumbThrottleThreshold = value;
+      Serial.println(F("[CMD]  -> brakeThumbThrottleThreshold updated"));
+    }
+    else
+    {
+      found = false;
+      Serial.print(F("[CMD] ERR: unknown key '"));
+      Serial.print(key);
+      Serial.println(F("'"));
+      wifiLogger.log("ERR unknown key: " + key);
+    }
+
+    if (found)
+    {
+      String ack = "ACK " + key + " " + String(value, 4);
+      wifiLogger.log(ack);
+      Serial.print(F("[CMD] Sent: "));
+      Serial.println(ack);
+    }
+  }
+
+  // ---- GET ALL ----
+  else if (cmd == "GET ALL")
+  {
+    Serial.println(F("[CMD] GET ALL — building single payload..."));
+
+    // Build the entire response as one string so it goes out in a single
+    // AT+CIPSEND, avoiding the per-call SEND OK round-trip overhead.
+    // Each line is \r\n terminated; log() will append one final \r\n.
+    String p = "";
+    p += "--- PARAMS BEGIN ---\r\n";
+    p += "kp1="     + String(K1[0], 4) + "\r\n";
+    p += "ki1="     + String(K1[1], 4) + "\r\n";
+    p += "kd1="     + String(K1[2], 4) + "\r\n";
+    p += "kp2="     + String(K2[0], 4) + "\r\n";
+    p += "ki2="     + String(K2[1], 4) + "\r\n";
+    p += "kd2="     + String(K2[2], 4) + "\r\n";
+    p += "alpha="   + String(alpha, 4) + "\r\n";
+    p += "beta0="   + String(betaTab[0], 4) + "\r\n";
+    p += "beta1="   + String(betaTab[1], 4) + "\r\n";
+    p += "gamma0="  + String(gammaTab[0], 4) + "\r\n";
+    p += "gamma1="  + String(gammaTab[1], 4) + "\r\n";
+    p += "sp0="     + String(consigneCapteurTab[0], 4) + "\r\n";
+    p += "sp1="     + String(consigneCapteurTab[1], 4) + "\r\n";
+    p += "minA="    + String(minCurrent, 4) + "\r\n";
+    p += "maxA="    + String(maxCurrent, 4) + "\r\n";
+    p += "minBrk="  + String(minBrakeCurrent, 4) + "\r\n";
+    p += "maxBrk="  + String(maxBrakeCurrent, 4) + "\r\n";
+    p += "rollThr=" + String(rollSpeedThreshold, 4) + "\r\n";
+    p += "brakeThr="+ String(brakeThumbThrottleThreshold, 4) + "\r\n";
+    p += "--- PARAMS END ---";
+
+    Serial.print(F("[CMD] GET ALL payload: "));
+    Serial.print(p.length());
+    Serial.println(F(" bytes — sending as one AT+CIPSEND"));
+
+    wifiLogger.log(p);
+    Serial.println(F("[CMD] GET ALL done"));
+  }
+
+  // ---- unknown ----
+  else
+  {
+    Serial.print(F("[CMD] ERR: unknown command '"));
+    Serial.print(cmd);
+    Serial.println(F("'"));
+    wifiLogger.log("ERR unknown command: " + cmd);
+    wifiLogger.log(F("ERR valid commands: SET <key> <value>  |  GET ALL"));
+  }
 }
 
 // Display debug info on the OLED screen (tiny screen, keep it short)

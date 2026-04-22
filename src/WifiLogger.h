@@ -22,11 +22,13 @@
  *   wifiLogger.begin(Serial1);
  *
  *   // --- loop() ---
- *   wifiLogger.update();       // near the top, every loop — parses ESP events
- *   wifiLogger.log(csvLine);   // inside the 200 ms telemetry block
+ *   wifiLogger.update();
+ *   if (wifiLogger.newClientConnected())
+ *     wifiLogger.log(String(WifiLogger::CSV_HEADER));
+ *   wifiLogger.log(csvLine);
  *
  * On the laptop, connect to the SoftAP then run:
- *   python3 -c "import socket; s=socket.create_connection(('192.168.4.1',8888)); [print(l,end='') for l in s.makefile()]"
+ *   python3 client.py
  */
 class WifiLogger
 {
@@ -52,26 +54,57 @@ public:
     /**
      * Must be called every loop().
      * Reads unsolicited ESP output and updates connection state:
-     *   "X,CONNECT" → marks a client as connected
-     *   "X,CLOSED"  → marks the client as disconnected
-     * Non-blocking.
+     *   "X,CONNECT"        → marks a client as connected
+     *   "X,CLOSED"         → marks the client as disconnected
+     *   "+IPD,X,N:<data>"  → stores incoming TCP data as a pending command
+     * Non-blocking. Never calls log() internally.
      */
     void update();
 
     /**
-     * Send one pre-formatted CSV line to the connected client via AT+CIPSEND.
+     * Returns true exactly once after a new client connects.
+     * The caller must send the CSV header in response.
+     * This exists so log() is never called from inside update(), which
+     * would block the serial stream for up to 2 s and swallow +IPD bytes.
+     */
+    bool newClientConnected();
+
+    /**
+     * Returns true if a complete command line was received from the TCP
+     * client since the last call to getCommand().
+     */
+    bool hasCommand();
+
+    /**
+     * Returns the last received command string and clears the pending flag.
+     * Call only after hasCommand() returns true.
+     */
+    String getCommand();
+
+    /**
+     * Send one pre-formatted line to the connected client via AT+CIPSEND.
+     * Drains stale bytes first, waits up to 500 ms for '>', then waits for
+     * SEND OK before returning — safe for burst sends (e.g. GET ALL).
+     * Sets _clientConnected = false if '>' never arrives.
      * No-op if no client is connected or begin() failed.
-     * Waits at most 500 ms for the '>' prompt — if it doesn't arrive the
-     * client is assumed to have disconnected.
      */
     void log(const String& line);
+
+    /**
+     * High-frequency streaming variant of log().
+     * Drains stale bytes first, waits up to 300 ms for '>', sends, then
+     * waits up to 150 ms for SEND OK to leave the ESP in a clean state.
+     * Does NOT set _clientConnected = false on a '>' timeout — a missed
+     * sample is harmless, but a false disconnect kills streaming permanently.
+     * No-op if no client is connected or begin() failed.
+     */
+    void logStream(const String& line);
 
     /** True when a TCP client is currently connected. */
     bool isClientConnected();
 
 private:
     // Send an AT command and wait for an expected response string.
-    // Prints the command and result to Serial for debugging.
     bool sendAT(const char* cmd, const char* expect = "OK", unsigned long timeout = 2000);
 
     // Block until `target` appears in the ESP stream or timeout expires.
@@ -80,9 +113,13 @@ private:
     const char* _ssid;
     const char* _password;
     uint16_t    _port;
-    Stream*     _serial;          // pointer to the ESP AT serial port
-    bool        _ready;           // true after a successful begin()
-    bool        _clientConnected; // toggled by parsing "X,CONNECT" / "X,CLOSED"
-    int         _connectionId;    // the CIPMUX connection id (0–4)
-    String      _lineBuffer;      // accumulates chars between '\n' in update()
+    Stream*     _serial;             // pointer to the ESP AT serial port
+    bool        _ready;              // true after a successful begin()
+    bool        _clientConnected;    // toggled by parsing "X,CONNECT" / "X,CLOSED"
+    int         _connectionId;       // the CIPMUX connection id (0-4)
+    String      _lineBuffer;         // accumulates chars between '\n' in update()
+
+    bool        _newClientConnected; // set by update(), cleared by newClientConnected()
+    bool        _hasCommand;         // true when a complete command line is waiting
+    String      _pendingCommand;     // the last received command text
 };
