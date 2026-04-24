@@ -2,43 +2,21 @@
 """
 CharretteController WiFi client
 ================================
-Connects to the PicoTrailer SoftAP and multiplexes telemetry output and
-command input over a single TCP connection.
-
-Incoming telemetry lines print above the prompt without disturbing whatever
-you are currently typing — readline's buffer is preserved and redrawn each
-time a new line arrives (only when you have actually started typing).
+Logs all telemetry to a timestamped CSV file while showing only
+user‑important responses (ACK, ERR, GET ALL) on the console.
 
 Usage
 -----
-1. Connect your laptop to the "PicoTrailer" Wi-Fi network.
-2. Run:
-       python3 client.py
-
-Commands
---------
-  GET ALL              — print all current tunable parameter values
-  SET <key> <value>    — update a parameter live, e.g.  SET kp1 2.5
-
-Tunable keys
-------------
-  kp1  ki1  kd1        PID gains, boost/ride mode  (K1)
-  kp2  ki2  kd2        PID gains, walk mode        (K2)
-  alpha                sensor threshold to engage PID
-  beta0  beta1         decel threshold per mode
-  gamma0 gamma1        brake threshold per mode
-  sp0    sp1           PID setpoint per mode
-  minA   maxA          motor current limits (A)
-  minBrk maxBrk        brake current limits (A)
-  rollThr              min speed considered "rolling" (km/h)
-  brakeThr             brake thumb-throttle dead-zone
-
-Press Ctrl+C or type 'quit' to disconnect.
+    python3 client.py                     # logs to telemetry_<timestamp>.csv
+    python3 client.py --log mydata.csv    # custom filename
 """
 
+import argparse
+import os
 import socket
 import sys
 import threading
+from datetime import datetime
 
 try:
     import readline
@@ -47,16 +25,14 @@ try:
 except ImportError:
     _HAS_READLINE = False
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
+# ── Config ────────────────────────────────────────────────────────────────
 HOST = "192.168.4.1"
 PORT = 8888
-CONNECT_TIMEOUT = 6  # seconds
+CONNECT_TIMEOUT = 6
 PROMPT = "> "
 
-# ── ANSI helpers ──────────────────────────────────────────────────────────────
 
-
+# ── ANSI helpers ──────────────────────────────────────────────────────────
 def _supports_colour() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
@@ -69,7 +45,7 @@ YELLOW = "\033[93m" if _COL else ""
 RED = "\033[91m" if _COL else ""
 CYAN = "\033[96m" if _COL else ""
 
-ERASE_LINE = "\r\033[K"  # move to col 0 + erase to end of line
+ERASE_LINE = "\r\033[K"
 
 
 def _colour_line(line: str) -> str:
@@ -85,82 +61,103 @@ def _colour_line(line: str) -> str:
     return line
 
 
-# ── Incoming-line printer ─────────────────────────────────────────────────────
+# ── Telemetry filter (console only) ───────────────────────────────────────
+def _is_telemetry(line: str) -> bool:
+    """Return True if the line is high‑rate telemetry (not printed)."""
+    if not line:
+        return False
+    # Sensor streaming lines start with "S:"
+    if line.startswith("S:"):
+        return False
+    # CSV header or data lines start with "timestamp_ms" or a digit
+    if line[0].isdigit() or line.startswith("timestamp_ms"):
+        return True
+    return False
 
 
+# ── Incoming‑line printer (non‑blocking) ──────────────────────────────────
 def _print_received(line: str) -> None:
-    """
-    Print one line received from the Pico without clobbering what the user
-    is currently typing.
-
-    Sequence:
-      1. Erase the current terminal line  (wipes prompt + partial input)
-      2. Print the received data + newline
-      3. If the user has already started typing, reprint  '> <partial>'
-         so it reappears below the new data.
-
-    Step 3 is skipped when the buffer is empty (e.g. between commands) to
-    avoid double-printing the prompt and confusing readline.
-    """
-    # Erase current line, print received data
     sys.stdout.write(ERASE_LINE + _colour_line(line) + "\n")
-
-    # Only reprint the partial input when there is actually something typed.
-    # Reprinting an empty prompt here would leave a stray "> " that readline
-    # then duplicates when it redraws its own prompt.
     if _HAS_READLINE:
         buf = readline.get_line_buffer()
         if buf:
             sys.stdout.write(PROMPT + buf)
-
     sys.stdout.flush()
 
 
-# ── Reader thread ─────────────────────────────────────────────────────────────
-
+# ── Reader thread: drain socket as fast as possible ───────────────────────
 _stop_event = threading.Event()
 
 
-def _reader(sock: socket.socket) -> None:
-    """Background thread: read lines from the socket and display them."""
-    try:
-        f = sock.makefile("r", encoding="utf-8", errors="replace")
-        for line in f:
-            # Skip high-frequency sensor stream lines (S:...) — those are
-            # intended for graph.py, not the command console.
-            # if line.startswith("S:"):
-            #    continue
-            _print_received(line.rstrip())
-    except Exception:
-        pass
-    finally:
-        _stop_event.set()
+def _reader(sock: socket.socket, log_file) -> None:
+    """Read raw data, display non‑telemetry, log only telemetry lines."""
+    buffer = b""
+    sock.settimeout(0.1)
+
+    while not _stop_event.is_set():
+        try:
+            data = sock.recv(4096)
+            if not data:
+                print(f"\n{RED}Connection closed by remote{RESET}", file=sys.stderr)
+                break
+            buffer += data
+
+            # Process complete lines
+            while b"\n" in buffer:
+                line_bytes, buffer = buffer.split(b"\n", 1)
+                line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
+                print("--------------")
+                # Log telemetry lines to file
+                if log_file and _is_telemetry(line):
+                    log_file.write(line + "\n")
+                    log_file.flush()
+
+                # Display non‑telemetry lines (user responses)
+                if not _is_telemetry(line):
+                    _print_received(line)
+
+        except socket.timeout:
+            continue
+        except Exception as e:
+            print(f"\n{RED}Reader error: {e}{RESET}", file=sys.stderr)
+            break
+
+    _stop_event.set()
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="CharretteController WiFi client")
+    parser.add_argument(
+        "--log", help="Log file name (default: telemetry_<timestamp>.csv)"
+    )
+    args = parser.parse_args()
 
+    # Generate default timestamped filename if not provided
+    if args.log:
+        log_filename = args.log
+    else:
+        log_filename = datetime.now().strftime("logs/telemetry_%Y%m%d_%H%M%S.csv")
 
-def main() -> None:
+    log_file = open(log_filename, "w", encoding="utf-8")
+    print(f"Logging all telemetry to: {log_filename}")
+
     print(f"{CYAN}CharretteController WiFi client{RESET}")
     print(f"Connecting to {HOST}:{PORT} …")
 
     try:
         sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
-    except socket.timeout:
-        print(f"{RED}Timed out — is the Pico running and the hotspot visible?{RESET}")
-        sys.exit(1)
-    except OSError as exc:
+    except (socket.timeout, OSError) as exc:
         print(f"{RED}Could not connect: {exc}{RESET}")
+        log_file.close()
         sys.exit(1)
 
-    # Disable Nagle so short command strings go out immediately
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
     print(
         f"{GREEN}Connected.{RESET}  Commands: SET <key> <value>  |  GET ALL  |  quit\n"
     )
 
-    reader_thread = threading.Thread(target=_reader, args=(sock,), daemon=True)
+    reader_thread = threading.Thread(target=_reader, args=(sock, log_file), daemon=True)
     reader_thread.start()
 
     try:
@@ -173,15 +170,12 @@ def main() -> None:
             cmd = raw.strip()
             if not cmd:
                 continue
-
             if cmd.lower() in ("quit", "exit", "q"):
                 print("Disconnecting …")
                 break
 
             try:
-                sock.sendall((cmd + "\n").encode("utf-8"))
-                # Subtle grey echo so the user knows the send happened.
-                # The real response (ACK / PARAM lines) arrives as a received line.
+                sock.sendall((cmd + "\r\n").encode("utf-8"))
                 sys.stdout.write(f"{GREY}  → {cmd}{RESET}\n")
                 sys.stdout.flush()
             except OSError as exc:
@@ -193,6 +187,7 @@ def main() -> None:
     finally:
         _stop_event.set()
         sock.close()
+        log_file.close()
         print("Disconnected.")
 
 
