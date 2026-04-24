@@ -249,7 +249,7 @@ void AsyncWifiLogger::processSendState()
                 _promptSeen = false;
                 _waitingForOkSend=true;
                 _okSendReceived=false;
-                Serial.println(F("[AsyncWifi] Prompt seen, data sent"));
+                //Serial.println(F("[AsyncWifi] Prompt seen, data sent"));
             } else if (millis() - _stateStartTime > 1000) {
                 // Timeout waiting for prompt
                 Serial.println(F("[AsyncWifi] AT+CIPSEND prompt timeout"));
@@ -298,8 +298,8 @@ void AsyncWifiLogger::sendAsync(const String& line)
         return;  // silently drop
     }
 
-    Serial.println("Starting async send to client");
-    Serial.println(millis());
+    //Serial.println("Starting async send to client");
+    //Serial.println(millis());
     bool ok = _sendQueue.push(line);
     if (!ok) {
         static unsigned long lastWarn = 0;
