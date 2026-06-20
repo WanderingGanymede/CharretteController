@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-CharretteController WiFi client
-================================
-Logs all telemetry to a timestamped CSV file while showing only
-user‑important responses (ACK, ERR, GET ALL) on the console.
+CharretteController WiFi client – separate telemetry & sensor logs
+===================================================================
+Creates a folder like log_20260425_153022/ containing:
+  - telemetry.csv   (CSV header + data lines)
+  - sensor.csv      (raw sensor samples, "S:" lines)
 
-Usage
------
-    python3 client.py                     # logs to telemetry_<timestamp>.csv
-    python3 client.py --log mydata.csv    # custom filename
+Console shows only user‑facing responses (ACK, ERR, GET ALL).
 """
 
 import argparse
@@ -61,21 +59,25 @@ def _colour_line(line: str) -> str:
     return line
 
 
-# ── Telemetry filter (console only) ───────────────────────────────────────
-def _is_telemetry(line: str) -> bool:
-    """Return True if the line is high‑rate telemetry (not printed)."""
+# ── Data classification ──────────────────────────────────────────────────
+def _is_sensor(line: str) -> bool:
+    """True for raw sensor stream lines (S:...)."""
+    return line.startswith("S:")
+
+
+def _is_telemetry_csv(line: str) -> bool:
+    """True for CSV header or data lines."""
     if not line:
         return False
-    # Sensor streaming lines start with "S:"
-    if line.startswith("S:"):
-        return False
-    # CSV header or data lines start with "timestamp_ms" or a digit
-    if line[0].isdigit() or line.startswith("timestamp_ms"):
+    if line.startswith("timestamp_ms"):
+        return True
+    # CSV data lines start with a digit (the timestamp)
+    if line[0].isdigit():
         return True
     return False
 
 
-# ── Incoming‑line printer (non‑blocking) ──────────────────────────────────
+# ── Console printer ──────────────────────────────────────────────────────
 def _print_received(line: str) -> None:
     sys.stdout.write(ERASE_LINE + _colour_line(line) + "\n")
     if _HAS_READLINE:
@@ -85,12 +87,11 @@ def _print_received(line: str) -> None:
     sys.stdout.flush()
 
 
-# ── Reader thread: drain socket as fast as possible ───────────────────────
+# ── Reader thread ────────────────────────────────────────────────────────
 _stop_event = threading.Event()
 
 
-def _reader(sock: socket.socket, log_file) -> None:
-    """Read raw data, display non‑telemetry, log only telemetry lines."""
+def _reader(sock: socket.socket, tele_file, sen_file) -> None:
     buffer = b""
     sock.settimeout(0.1)
 
@@ -101,20 +102,23 @@ def _reader(sock: socket.socket, log_file) -> None:
                 print(f"\n{RED}Connection closed by remote{RESET}", file=sys.stderr)
                 break
             buffer += data
-
-            # Process complete lines
+            buffer = buffer.removesuffix(b"\r\n")
             while b"\n" in buffer:
                 line_bytes, buffer = buffer.split(b"\n", 1)
                 line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
-                print("--------------")
-                # Log telemetry lines to file
-                if log_file and _is_telemetry(line):
-                    log_file.write(line + "\n")
-                    log_file.flush()
 
-                # Display non‑telemetry lines (user responses)
-                if not _is_telemetry(line):
-                    _print_received(line)
+                # Log to appropriate file
+                if _is_sensor(line) and sen_file:
+                    stripped_line = line.split(":")[1]
+                    sen_file.write(stripped_line + "\n")
+                    sen_file.flush()
+                elif _is_telemetry_csv(line) and tele_file:
+                    tele_file.write(line + "\n")
+                    tele_file.flush()
+
+                # Only show non‑data lines on console
+                if not (_is_sensor(line) or _is_telemetry_csv(line)):
+                    _print_received(line.strip())
 
         except socket.timeout:
             continue
@@ -125,23 +129,26 @@ def _reader(sock: socket.socket, log_file) -> None:
     _stop_event.set()
 
 
-# ── Main ───────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="CharretteController WiFi client")
     parser.add_argument(
-        "--log", help="Log file name (default: telemetry_<timestamp>.csv)"
+        "--logdir", help="Log directory name (default: log_<timestamp>)"
     )
     args = parser.parse_args()
 
-    # Generate default timestamped filename if not provided
+    # Create a timestamped folder for log files
+    folder = args.logdir or datetime.now().strftime("logs/log_%Y%m%d_%H%M%S")
+    os.makedirs(folder, exist_ok=True)  # exist_ok=True safe though unlikely to collide
 
-    if args.log:
-        log_filename = args.log
-    else:
-        log_filename = datetime.now().strftime("logs/telemetry_%Y%m%d_%H%M%S.csv")
+    tele_path = os.path.join(folder, "telemetry.csv")
+    sens_path = os.path.join(folder, "sensor.csv")
 
-    log_file = open(log_filename, "w", encoding="utf-8")
-    print(f"Logging all telemetry to: {log_filename}")
+    tele_file = open(tele_path, "w", encoding="utf-8")
+    sens_file = open(sens_path, "w", encoding="utf-8")
+    print(f"Logging to folder: {folder}/")
+    print(f"  Telemetry : {tele_path}")
+    print(f"  Sensor    : {sens_path}")
 
     print(f"{CYAN}CharretteController WiFi client{RESET}")
     print(f"Connecting to {HOST}:{PORT} …")
@@ -150,7 +157,8 @@ def main():
         sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
     except (socket.timeout, OSError) as exc:
         print(f"{RED}Could not connect: {exc}{RESET}")
-        log_file.close()
+        tele_file.close()
+        sens_file.close()
         sys.exit(1)
 
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -158,7 +166,9 @@ def main():
         f"{GREEN}Connected.{RESET}  Commands: SET <key> <value>  |  GET ALL  |  quit\n"
     )
 
-    reader_thread = threading.Thread(target=_reader, args=(sock, log_file), daemon=True)
+    reader_thread = threading.Thread(
+        target=_reader, args=(sock, tele_file, sens_file), daemon=True
+    )
     reader_thread.start()
 
     try:
@@ -188,7 +198,8 @@ def main():
     finally:
         _stop_event.set()
         sock.close()
-        log_file.close()
+        tele_file.close()
+        sens_file.close()
         print("Disconnected.")
 
 

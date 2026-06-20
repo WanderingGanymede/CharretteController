@@ -108,6 +108,12 @@ int resetOffsetIter;      // compteur pour compter le nombre d'aller retour sur
 MovingAverageFilter<double, double>
     movingOffset(16); // moyenne lissée sur 16 valeurs
 double newOffset, rawValue;
+// Exponential Moving Average — replaces the old MovingAverageFilter
+float emaAlpha = 0.2;               // smoothing factor: 0 (heavy) … 1 (none)
+double emaValue = 0.0;              // current EMA output
+bool emaInitialised = false;        // true after first sample
+
+
 
 bool capteurResponsive = false;
 long capteurTimeout = 2000;
@@ -160,11 +166,11 @@ const int sclWire1 = 11;
 
 // Paramètres à changer:
 
-double K1[3] = {1, 3, 0.125}; // boost, mode 0 pour les led
+double K1[3] = {7, 0, 0}; // boost, mode 0 pour les led
 double K2[3] = {1, 2, 0.1};   // marche, mode 1 pour les led
 float betaTab[2] = {-4, -3};
 float gammaTab[2] = {-8, -6};
-double consigneCapteurTab[2] = {-0.1, 0.0};
+double consigneCapteurTab[2] = {0.15, 0.0};
 
 double sortieMoteurAccel; // output
 double consigneCapteur =
@@ -180,6 +186,19 @@ float minCurrent = 1.5, maxCurrent = 30;
 
 float minBrakeCurrent = 0, maxBrakeCurrent = 50;
 
+
+bool applyingBrake=false;
+float cooldownAfterBrake=2000;
+float lastBrakeRelease=0;
+float lastBrakeApplied=0;
+float minRPMtest=0;
+float maxRPMtest=3700;
+
+float maxDuty=0.4;
+
+bool speedLimitActive=false;
+float maxSpeedLimit = 10.0;          // km/h – speed above which we start braking
+float speedBrakeGain = 2.0;         // A per km/h over the limit
 int pidDir = REVERSE;
 
 PID mainPID(&valeurCapteurMoyenne, &sortieMoteurAccel, &consigneCapteur, K1[0],
@@ -421,51 +440,64 @@ void loop() {
       lastCapteurUpdate = millis();
 
       // Median pre‑filter (window 3) – removes isolated spikes
-      med_buf[med_idx] = valeurCapteurInstant;
-      med_idx = (med_idx + 1) % 3;
-      if (!med_full && med_idx == 0)
-        med_full = true;
+      if(valeurCapteurInstant>1.1 && (etat==FREINAGE||lastBrakeRelease+cooldownAfterBrake>millis()||speedLimitActive)){
+          //ignoring weirldy high sensor data when braking
+      }else{
 
-      float med_val = valeurCapteurInstant; // fallback if not yet full
-      if (med_full) {
-        // sort a copy of the buffer to find median
-        float a = med_buf[0], b = med_buf[1], c = med_buf[2];
-        if (a > b) {
-          float t = a;
-          a = b;
-          b = t;
+
+        med_buf[med_idx] = valeurCapteurInstant;
+        med_idx = (med_idx + 1) % 3;
+        if (!med_full && med_idx == 0)
+            med_full = true;
+
+        float med_val = valeurCapteurInstant; // fallback if not yet full
+        if (med_full) {
+            // sort a copy of the buffer to find median
+            float a = med_buf[0], b = med_buf[1], c = med_buf[2];
+            if (a > b) {
+            float t = a;
+            a = b;
+            b = t;
+            }
+            if (a > c) {
+            float t = a;
+            a = c;
+            c = t;
+            }
+            if (b > c) {
+            float t = b;
+            b = c;
+            c = t;
+            }
+            med_val = b; // the middle value
         }
-        if (a > c) {
-          float t = a;
-          a = c;
-          c = t;
+
+        // --- NEW: Exponential Moving Average ---
+            if (!emaInitialised) {
+                emaValue = med_val;           // start with the first median value
+                emaInitialised = true;
+            } else {
+                emaValue = emaAlpha * med_val + (1.0 - emaAlpha) * emaValue;
+            }
+        // Feed the median‑filtered value into your moving average
+        valeurCapteurFiltered.push(&valeurCapteurInstant, &valeurCapteurMoyenne);
+        rCapteur.value = valeurCapteurInstant * 1000;
+        rCapteur.timestamp += millis() / 1000;
+        diffCapteur.push(&rCapteur, &dCapteur);
+
+        newDataReady = 0;
+        // Accumulate sensor data into a buffer; flushed every 300 ms below.
+        // if (wifiStreamSensor) {
+        //Serial.println("=======");
+        String str = String(F("S:")) + String(millis()) + "," +
+                    String(valeurCapteurInstant, 4) + "," +
+                    String(valeurCapteurMoyenne, 4) + "," + String(med_val, 4) +","+String(emaValue)+
+                    "\n";
+
+        //Serial.println(str);
+        sensorBuffer += str;
+        // }
         }
-        if (b > c) {
-          float t = b;
-          b = c;
-          c = t;
-        }
-        med_val = b; // the middle value
-      }
-
-      // Feed the median‑filtered value into your moving average
-      valeurCapteurFiltered.push(&valeurCapteurInstant, &valeurCapteurMoyenne);
-      rCapteur.value = valeurCapteurInstant * 1000;
-      rCapteur.timestamp += millis() / 1000;
-      diffCapteur.push(&rCapteur, &dCapteur);
-
-      newDataReady = 0;
-      // Accumulate sensor data into a buffer; flushed every 300 ms below.
-      // if (wifiStreamSensor) {
-      //Serial.println("=======");
-      String str = String(F("S:")) + String(millis()) + "," +
-                   String(valeurCapteurInstant, 4) + "," +
-                   String(valeurCapteurMoyenne, 4) + "," + String(med_val, 4) +
-                   "\n";
-
-      //Serial.println(str);
-      sensorBuffer += str;
-      // }
     }
   }
   // Flush the sensor buffer every 300 ms in one AT+CIPSEND call.
@@ -485,10 +517,10 @@ void loop() {
 
   // Update VESC telemetry every vescUpdateInterval ms
   if (millis() - lastVescUpdate >= vescUpdateInterval) {
-    if (Serial2.available() >= VESC_TELEM_SIZE) {
+    //if (Serial2.available() >= VESC_TELEM_SIZE) {
       updateVescTelemetry(); // this will now complete instantly
       lastVescUpdate = millis();
-    }
+      //}
     // If not enough bytes, we simply skip this update – no blocking
   }
 
@@ -754,22 +786,28 @@ void loop() {
     int b1 = (int)digitalRead(toggle1Pin);
     int b3 = toggle3State;
     String b1str = b1 ? "On" : "Off";
-    String b3str = b3 ? "Off" : "On";
+
+
+    String b3str = b3 ? "On" : "Off";
     String motorStateStr = isCtrlAlive ? "Vesc" : "novesc";
     String motorBrakeStr = motorBrakeMode ? "MBrake" : "NoMBrk";
     float actualBrakeCurrent =
         fmap(brakesMapped, 0.0, 1.0, minBrakeCurrent, maxBrakeCurrent);
     actualBrakeCurrent = actualBrakeCurrent * (-1);
 
+    String bstr= displayAorB ? b1str: String(valeurCapteurMoyenne,2);
     String cstr = displayAorB ? b3str : motorStateStr;
     bikeDisplay.displayEightParams(
         String("A:") + etatsStr[etat],
-        String("B:") + String(valeurCapteurMoyenne, 2), String("C:") + cstr,
-        String("D:") + walkModeStr, String("E:") + String(brakesMapped, 2),
+        String("B:") + bstr,
+        String("C:") + cstr,
+        String("D:") + walkModeStr,
+        String("E:") + String(brakesMapped, 2),
         String("F:") + String(vitesseMoyenne, 2),
 
-        String("G:") + String(sortieMoteurAccel, 2),
-        String("H:") + String(actualBrakeCurrent, 2));
+        String("G:") + String(vescTelemetry.duty,2 ),
+        String("H:") + String(vescTelemetry.rpm,2)
+    );
 
     // --- WiFi telemetry log (CSV, 200 ms cadence) ---
     String csvLine =
@@ -787,7 +825,7 @@ void loop() {
     if (!wifiStreamSensor) {
 
 
-      String full_message= "C-"+csvLine+"\nS-\n"+sensorBuffer;
+      String full_message= csvLine+"\n"+sensorBuffer;
       wifiLogger.sendAsync(full_message);
       sensorBuffer = "";
       lastSensorFlush = millis();
@@ -801,58 +839,161 @@ void loop() {
     lastCommandSent = millis();
   }
 }
+bool testOveride=false;
+void sendVescCommands()
+{
 
-// TODO envoi des instructions au vesc
-void sendVescCommands() {
-  // blocage manuel au bouton
-  if (toggle3State == 1) {
-    // vesc.setCurrent(0);
-    //  vesc.setBrake(maxBrakeCurrent);
+  // Manual halt via toggle3
+  if (toggle3State == 1)
+  {
 
-    if (etat == DECCELERATION || etat == FREINAGE) {
+    if (etat == DECCELERATION || etat == FREINAGE)
+    {
       float brakesMapped = getBrakesMapped();
-      float actualBrakeCurrent =
-          fmap(brakesMapped, 0, 1, minBrakeCurrent, maxBrakeCurrent);
-      vesc.setBrake(actualBrakeCurrent * (-1));
-      // vesc.setCurrent(0);
-    } else {
-      vesc.setCurrent(0);
+      float actualBrakeCurrent = fmap(brakesMapped, 0, 1, minBrakeCurrent, maxBrakeCurrent);
+      brake(actualBrakeCurrent);
+      //vesc.setBrake(actualBrakeCurrent ));   // keep existing sign convention
+    }
+    else
+    {
+        accelerate(0);
+      //vesc.setCurrent(0);
     }
     return;
   }
-  if (!capteurResponsive) {
-    vesc.setCurrent(0);
+
+  if(testOveride){
+      float rpmInput= getBrakesMapped();
+
+          float actualRpm= fmap(rpmInput,0,1,0, maxRPMtest);
+
+
+          float actualBrakeCurrent = fmap(rpmInput, 0, 1, minBrakeCurrent, maxBrakeCurrent);
+          float actualDuty= fmap (rpmInput,0,1,0,maxDuty);
+          //vesc.setRPM(actualRpm);
+          brake(actualBrakeCurrent);
+
+          //vesc.setBrake(actualBrakeCurrent);
+          // vesc.setDuty(actualDuty);
+
+          return;
+  }
+  if (!capteurResponsive)
+  {
+      accelerate(0);
+    //vesc.setCurrent(0);
     return;
   }
 
-  if (isCtrlAlive) {
-    if (etat == ROULE || etat == STATU_QUO) {
+  if (!isCtrlAlive)
+  {
+      accelerate(0);
+    //vesc.setCurrent(0);
+    return;
+  }
 
-      if (sortieMoteurAccel > 0) {
-        vesc.setCurrent(sortieMoteurAccel);
-      } else {
+  // --- Compute the force-based current command (signed) ---
+  float forceCurrent = 0.0;   // positive = accel, negative = brake
 
-        vesc.setBrake(sortieMoteurAccel);
-      }
+  if (etat == ROULE || etat == STATU_QUO)
+  {
+    forceCurrent = sortieMoteurAccel;   // PID output (signed)
+  }
+  else if (etat == DECCELERATION || etat == FREINAGE)
+  {
+    float brakesMapped = getBrakesMapped();
+    float actualBrakeCurrent = fmap(brakesMapped, 0, 1, minBrakeCurrent, maxBrakeCurrent);
+    forceCurrent = -actualBrakeCurrent;   // brake is negative
+  }
+  else
+  {
+    // other states (e.g. INIT, ATTENTE) – no force current
+    forceCurrent = 0.0;
+  }
+
+  // --- Speed limiter (only when VESC is alive and we have a speed reading) ---
+  float speedLimitBrake = 0.0;   // positive braking current requested by limiter
+  speedLimitActive = false;
+  if (isCtrlAlive && vescResponsive && vitesseMoyenne > maxSpeedLimit)
+  {
+    float speedError = vitesseMoyenne - maxSpeedLimit;
+    speedLimitBrake = speedError * speedBrakeGain;
+    if (speedLimitBrake > maxBrakeCurrent)
+      speedLimitBrake = maxBrakeCurrent;
+    speedLimitActive = true;
+  }
+
+  // --- Final command blending ---
+  if (speedLimitActive)
+  {
+    if (forceCurrent >= 0.0)
+    {
+      // Force PID wants to accelerate → override entirely with speed-limit brake
+      brake(speedLimitBrake);
+      //vesc.setBrake(speedLimitBrake);   // setBrake expects positive value
     }
-    // vesc.setBrake(0);
-    else if (etat == DECCELERATION || etat == FREINAGE) {
-      float brakesMapped = getBrakesMapped();
-      float actualBrakeCurrent =
-          fmap(brakesMapped, 0, 1, minBrakeCurrent, maxBrakeCurrent);
-      vesc.setBrake(actualBrakeCurrent * (-1));
-      // vesc.setCurrent(0);
+    else
+    {
+      // Force PID already wants to brake – use the stronger brake
+      float forceBrake = -forceCurrent;   // convert to positive braking magnitude
+      float finalBrake = (forceBrake > speedLimitBrake) ? forceBrake : speedLimitBrake;
+      brake(finalBrake);
+      //vesc.setBrake(finalBrake);
     }
-  } else {
-    Serial.println("no vesc to send to ");
-    // pas tres util Vu Q'uon est deco
-    vesc.setCurrent(0);
+  }
+  else
+  {
+    // Normal operation – no speed limit
+    if (forceCurrent > 0.0)
+        accelerate(forceCurrent);
+        //vesc.setCurrent(forceCurrent);
+    else if (forceCurrent < 0.0)
+        brake(-forceCurrent);
+        //vesc.setBrake(-forceCurrent);   // convert to positive for setBrake
+    else
+        accelerate(0);
+      //vesc.setCurrent(0);
   }
 }
 
+void accelerate(float accelerationCurrent){
+
+    if(applyingBrake){
+        releaseBrake();
+        return;
+    }
+    if(millis()-lastBrakeRelease>cooldownAfterBrake){
+        vesc.setCurrent(accelerationCurrent);
+
+    }
+
+}
+void releaseBrake(){
+    if(applyingBrake){
+        applyingBrake=false;
+        lastBrakeRelease=millis();
+    }
+    vesc.setBrake(0);
+}
+void brake(float brakeCurrent){
+    if(brakeCurrent==0){
+        releaseBrake();
+        return;
+    }
+
+    if(!applyingBrake){
+        applyingBrake=true;
+    }
+
+    vesc.setBrake(brakeCurrent);
+
+    lastBrakeApplied=millis();
+
+}
+
 void updateVescTelemetry() {
-  Serial.println("up vesc val");
-  Serial.println(millis());
+  //Serial.println("up vesc val");
+  //Serial.println(millis());
   if (vesc.getValues()) {
     isCtrlAlive = true;
     vescResponsive = true;
@@ -870,30 +1011,30 @@ void updateVescTelemetry() {
     vescTelemetry.tachometerAbs = vesc.getTachometerAbs();
     miseAJourVitesse();
     if (debug) {
-      Serial.print("VESC RPM: ");
-      Serial.print(vescTelemetry.rpm);
-      Serial.print(" | Voltage: ");
-      Serial.print(vescTelemetry.voltage);
-      Serial.print(" V | Current: ");
-      Serial.print(vescTelemetry.current);
-      Serial.print(" A | Duty: ");
-      Serial.print(vescTelemetry.duty);
-      Serial.print(" | Temp MOSFET: ");
-      Serial.print(vescTelemetry.tempMosfet);
-      Serial.print(" | Temp Motor: ");
-      Serial.print(vescTelemetry.tempMotor);
-      Serial.print(" | Ah: ");
-      Serial.print(vescTelemetry.ampHours);
-      Serial.print(" | Ah Charged: ");
-      Serial.print(vescTelemetry.ampHoursCharged);
-      Serial.print(" | Wh: ");
-      Serial.print(vescTelemetry.wattHours);
-      Serial.print(" | Wh Charged: ");
-      Serial.print(vescTelemetry.wattHoursCharged);
-      Serial.print(" | Tacho: ");
-      Serial.print(vescTelemetry.tachometer);
-      Serial.print(" | TachoAbs: ");
-      Serial.println(vescTelemetry.tachometerAbs);
+      //Serial.print("VESC RPM: ");
+      //Serial.print(vescTelemetry.rpm);
+      //Serial.print(" | Voltage: ");
+      //Serial.print(vescTelemetry.voltage);
+      //Serial.print(" V | Current: ");
+      //Serial.print(vescTelemetry.current);
+      //Serial.print(" A | Duty: ");
+      //Serial.print(vescTelemetry.duty);
+      //Serial.print(" | Temp MOSFET: ");
+      //Serial.print(vescTelemetry.tempMosfet);
+      //Serial.print(" | Temp Motor: ");
+      //Serial.print(vescTelemetry.tempMotor);
+      //Serial.print(" | Ah: ");
+      //Serial.print(vescTelemetry.ampHours);
+      //Serial.print(" | Ah Charged: ");
+      //Serial.print(vescTelemetry.ampHoursCharged);
+      //Serial.print(" | Wh: ");
+      //Serial.print(vescTelemetry.wattHours);
+      //Serial.print(" | Wh Charged: ");
+      //Serial.print(vescTelemetry.wattHoursCharged);
+      //Serial.print(" | Tacho: ");
+      //Serial.print(vescTelemetry.tachometer);
+      //Serial.print(" | TachoAbs: ");
+      //Serial.println(vescTelemetry.tachometerAbs);
     }
   } else {
 
@@ -954,6 +1095,7 @@ int initializeVesc() {
     Serial.println("Error: Serial2 failed to initialize!");
     return 1; // Or enter a safe state
   }
+  bikeDisplay.displayMessage("trying setSerial");
   vesc.setSerialPort(&Serial2);
   bikeDisplay.displayMessage("VESC Initialized");
   return 0;
@@ -1268,7 +1410,22 @@ void handleWifiCommand(const String &cmd) {
     } else if (key == "brakeThr") {
       brakeThumbThrottleThreshold = value;
       Serial.println(F("[CMD]  -> brakeThumbThrottleThreshold updated"));
-    } else {
+    } else if (key == "emaAlpha") {
+        emaAlpha = value;
+        if (emaAlpha < 0.0f) emaAlpha = 0.0f;
+        if (emaAlpha > 1.0f) emaAlpha = 1.0f;
+        Serial.print(F("[CMD]  -> emaAlpha = "));
+        Serial.println(emaAlpha, 4);
+    }
+    else if (key == "maxSpeed") {
+        maxSpeedLimit = value;
+        Serial.println(F("[CMD]  -> maxSpeedLimit updated"));
+    }
+    else if (key == "speedGain") {
+        speedBrakeGain = value;
+        Serial.println(F("[CMD]  -> speedBrakeGain updated"));
+    }
+    else {
       found = false;
       Serial.print(F("[CMD] ERR: unknown key '"));
       Serial.print(key);
@@ -1312,6 +1469,9 @@ void handleWifiCommand(const String &cmd) {
     p += "maxBrk=" + String(maxBrakeCurrent, 4) + "\r\n";
     p += "rollThr=" + String(rollSpeedThreshold, 4) + "\r\n";
     p += "brakeThr=" + String(brakeThumbThrottleThreshold, 4) + "\r\n";
+    p += "emaAlpha=" + String(emaAlpha, 4) + "\r\n";
+    p += "maxSpeed=" + String(maxSpeedLimit, 1) + "\r\n";
+    p += "speedGain=" + String(speedBrakeGain, 2) + "\r\n";
     p += "--- PARAMS END ---";
 
     Serial.print(F("[CMD] GET ALL payload: "));

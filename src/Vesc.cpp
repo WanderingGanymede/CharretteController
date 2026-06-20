@@ -29,6 +29,10 @@ void Vesc::setBrake(float brake)
 {
     vescUart.setBrakeCurrent(brake);
 }
+void Vesc::setRPM(float rpm)
+{
+    vescUart.setRPM(rpm);
+}
 
 float Vesc::getRPM()
 {

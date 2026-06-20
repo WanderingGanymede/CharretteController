@@ -17,6 +17,12 @@ int toggle1NewState = 0;
 int toggle2NewState = 0;
 int toggle3NewState = 0;
 
+float adc0Alpha = 0.6;          // tune via WiFi (0 = max smooth, 1 = raw)
+float adc0Smoothed = 0;        // filtered ADC0 value
+bool adc0SmoothedInit = false;
+float adc1Alpha = 0.3;          // tune via WiFi (0 = max smooth, 1 = raw)
+float adc1Smoothed = 0;        // filtered ADC0 value
+bool adc1SmoothedInit = false;
 // Forward declarations for user actions
 void setMode(int mode);
 void buttonAPressed()
@@ -126,29 +132,64 @@ void InputControlHandler()
 // --- ADC (Analog) input handling for Pi Pico ---
 int adc0Pin = 26;
 int adc1Pin = 27;
-int adc0Value = 0;
-int adc1Value = 0;
+int adc0Raw = 0;
+int adc1Raw = 0;
 
 void readADCInputs()
 {
-    adc0Value = analogRead(adc0Pin); // ADC0 is GPIO26
 
-    adc1Value = analogRead(adc1Pin); // ADC1 is GPIO27
+    // then feed cleanRaw to the EMA
+    adc0Raw = analogRead(adc0Pin); // ADC0 is GPIO26
+
+    adc1Raw = analogRead(adc1Pin);// ADC1 is GPIO27
+    // inside readADCInputs() before EMA
+       static int medBuf[3] = {0,0,0};
+       static int medIdx = 0;
+       static bool medFull = false;
+
+       medBuf[medIdx] = adc0Raw;
+       medIdx = (medIdx + 1) % 3;
+       if (!medFull && medIdx == 0) medFull = true;
+
+       int cleanRaw0 = adc0Raw;
+       if (medFull) {
+           int a = medBuf[0], b = medBuf[1], c = medBuf[2];
+           if (a > b) { int t = a; a = b; b = t; }
+           if (a > c) { int t = a; a = c; c = t; }
+           if (b > c) { int t = b; b = c; c = t; }
+           cleanRaw0= b;
+       }
+    // EMA filter for throttle
+    if (!adc0SmoothedInit) {
+        adc0Smoothed = cleanRaw0;
+        adc0SmoothedInit = true;
+    } else {
+        adc0Smoothed = adc0Alpha * cleanRaw0 + (1.0 - adc0Alpha) * adc0Smoothed;
+    }
+
+    // EMA filter for brake
+    if (!adc1SmoothedInit) {
+        adc1Smoothed = adc1Raw;
+        adc1SmoothedInit = true;
+    } else {
+        adc1Smoothed = adc1Alpha * adc1Raw + (1.0 - adc1Alpha) * adc1Smoothed;
+    }
+
 }
 
 int getADC0()
 {
-    return adc0Value;
+    return adc0Smoothed;
 }
 
 float getBrakesMapped(float in_min, float in_max, float out_min, float out_max)
 {
-    float res = (float)(adc0Value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+    float res = (float)(adc0Smoothed - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
     // cap res to 0 - 1
     res = res < 0 ? 0 : (res > 1 ? 1 : res);
     return res;
 }
 int getADC1()
 {
-    return adc1Value;
+    return adc1Raw;
 }

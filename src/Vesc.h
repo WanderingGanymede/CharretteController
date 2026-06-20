@@ -12,6 +12,7 @@ public:
     void setCurrent(float current);
     void setDuty(float duty);
     void setBrake(float brake);
+    void setRPM(float rpm);
     float getRPM();
     float getVoltage();
     float getCurrent();
