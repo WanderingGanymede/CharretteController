@@ -31,6 +31,31 @@ int myFunction(int, int);
 #if defined(ESP8266) || defined(ESP32) || defined(AVR)
 #include <EEPROM.h>
 #endif
+// ---------------------------------------------------------------------------
+// Persistent settings stored in EEPROM
+// ---------------------------------------------------------------------------
+struct Settings {
+  uint32_t magic = 0x4321ABCD;          // validation key
+  double K1[3] = {7, 0, 0};
+  double K2[3] = {1, 2, 0.1};
+  float betaTab[2] = {-4, -3};
+  float gammaTab[2] = {-8, -6};
+  double consigneCapteurTab[2] = {0.15, 0.0};
+  float minCurrent = 1.5;
+  float maxCurrent = 30;
+  float minBrakeCurrent = 0;
+  float maxBrakeCurrent = 50;
+  float alpha = 1.0;
+  float rollSpeedThreshold = 1.0;
+  float brakeThumbThrottleThreshold = 0.03;
+  float emaAlpha = 0.2;
+  float maxSpeedLimit = 10.0;
+  float speedBrakeGain = 2.0;
+  // bool wifiStreamSensor = false;   // optional, left out for now
+};
+
+Settings settings;  // global instance (will be loaded in setup())
+
 
 // WiFi logger — SoftAP + TCP server via ESP8285 on Serial1
 // WifiLogger wifiLogger("PicoTrailer", "12345678");
@@ -166,11 +191,11 @@ const int sclWire1 = 11;
 
 // Paramètres à changer:
 
-double K1[3] = {7, 0, 0}; // boost, mode 0 pour les led
-double K2[3] = {1, 2, 0.1};   // marche, mode 1 pour les led
-float betaTab[2] = {-4, -3};
-float gammaTab[2] = {-8, -6};
-double consigneCapteurTab[2] = {0.15, 0.0};
+double K1[3]; // boost, mode 0 pour les led
+double K2[3];   // marche, mode 1 pour les led
+float betaTab[2];
+float gammaTab[2];
+double consigneCapteurTab[2] ;
 
 double sortieMoteurAccel; // output
 double consigneCapteur =
@@ -182,23 +207,19 @@ double consigneCapteur =
 // cas de changement de batterie ou contrôleur.gvgv
 
 /// KNOBS
-float minCurrent = 1.5, maxCurrent = 30;
+float minCurrent , maxCurrent ;
 
-float minBrakeCurrent = 0, maxBrakeCurrent = 50;
+float minBrakeCurrent , maxBrakeCurrent ;
 
 
 bool applyingBrake=false;
 float cooldownAfterBrake=2000;
 float lastBrakeRelease=0;
 float lastBrakeApplied=0;
-float minRPMtest=0;
-float maxRPMtest=3700;
-
-float maxDuty=0.4;
 
 bool speedLimitActive=false;
-float maxSpeedLimit = 10.0;          // km/h – speed above which we start braking
-float speedBrakeGain = 2.0;         // A per km/h over the limit
+float maxSpeedLimit ;          // km/h – speed above which we start braking
+float speedBrakeGain ;         // A per km/h over the limit
 int pidDir = REVERSE;
 
 PID mainPID(&valeurCapteurMoyenne, &sortieMoteurAccel, &consigneCapteur, K1[0],
@@ -232,10 +253,9 @@ static String etatsStr[] = {"INIT",  "ATT",   "ROULE",  "S_QUO",
 // Ancre paramètre 2
 float rollSpeedThreshold = 1;
 float alpha = 1;         // seuil au dessus duquel le PID se calcule et se lance
-float beta = betaTab[0]; // seuil en deça duquel on passe sur déccélération
+float beta ; // seuil en deça duquel on passe sur déccélération
                          // (pwm=0, pid manual)
-float brakeThreshold =
-    gammaTab[0]; // seuil en deça duquel on passe sur du freinage
+float brakeThreshold ; // seuil en deça duquel on passe sur du freinage
 
 /////////////////////////////////////////////////
 //////////// Vitesse moyenne ////////////////////
@@ -310,6 +330,7 @@ bool motorBrakeMode = 0;
 
 void setup() {
   Serial.begin(115200);
+  EEPROM.begin(4096);
   while (!Serial && millis() < 5000)
     ;
   Serial.println("###################");
@@ -317,7 +338,8 @@ void setup() {
   Serial.println("## date: : ");
   Serial.println("## Boulanger ");
   Serial.println("###################");
-
+  Serial.println(F("[setup] Loading settings from EEPROM..."));
+  loadSettings();
   Serial.println(F("[setup] Input control..."));
   setupInputControl();
   Serial.println(F("[setup] Input control OK"));
@@ -865,11 +887,11 @@ void sendVescCommands()
   if(testOveride){
       float rpmInput= getBrakesMapped();
 
-          float actualRpm= fmap(rpmInput,0,1,0, maxRPMtest);
+          //float actualRpm= fmap(rpmInput,0,1,0, maxRPMtest);
 
 
           float actualBrakeCurrent = fmap(rpmInput, 0, 1, minBrakeCurrent, maxBrakeCurrent);
-          float actualDuty= fmap (rpmInput,0,1,0,maxDuty);
+          //    float actualDuty= fmap (rpmInput,0,1,0,maxDuty);
           //vesc.setRPM(actualRpm);
           brake(actualBrakeCurrent);
 
@@ -1312,56 +1334,67 @@ void handleWifiCommand(const String &cmd) {
       if (!walkMode)
         setPIDMode(walkMode);
       Serial.println(F("[CMD]  -> K1[0] updated, PID re-tuned"));
+      settings.K1[0]=value;
     } else if (key == "ki1") {
       K1[1] = value;
       if (!walkMode)
         setPIDMode(walkMode);
       Serial.println(F("[CMD]  -> K1[1] updated, PID re-tuned"));
+      settings.K1[1]=value;
     } else if (key == "kd1") {
       K1[2] = value;
       if (!walkMode)
         setPIDMode(walkMode);
       Serial.println(F("[CMD]  -> K1[2] updated, PID re-tuned"));
+      settings.K1[2]=value;
     } else if (key == "kp2") {
       K2[0] = value;
       if (walkMode)
         setPIDMode(walkMode);
       Serial.println(F("[CMD]  -> K2[0] updated, PID re-tuned"));
+      settings.K2[0]=value;
     } else if (key == "ki2") {
       K2[1] = value;
       if (walkMode)
         setPIDMode(walkMode);
       Serial.println(F("[CMD]  -> K2[1] updated, PID re-tuned"));
+      settings.K2[1]=value;
     } else if (key == "kd2") {
       K2[2] = value;
       if (walkMode)
         setPIDMode(walkMode);
       Serial.println(F("[CMD]  -> K2[2] updated, PID re-tuned"));
+      settings.K2[2]=value;
     }
     // --- thresholds ---
     else if (key == "alpha") {
       alpha = value;
       Serial.println(F("[CMD]  -> alpha updated"));
+      settings.alpha=value;
     } else if (key == "beta0") {
       betaTab[0] = value;
       if (!walkMode)
         beta = betaTab[0];
       Serial.println(F("[CMD]  -> betaTab[0] updated"));
+      settings.betaTab[0]=value;
     } else if (key == "beta1") {
       betaTab[1] = value;
       if (walkMode)
         beta = betaTab[1];
       Serial.println(F("[CMD]  -> betaTab[1] updated"));
+      settings.betaTab[1]=value;
     } else if (key == "gamma0") {
       gammaTab[0] = value;
       if (!walkMode)
         brakeThreshold = gammaTab[0];
       Serial.println(F("[CMD]  -> gammaTab[0] updated"));
+      settings.gammaTab[0]=value;
     } else if (key == "gamma1") {
       gammaTab[1] = value;
       if (walkMode)
         brakeThreshold = gammaTab[1];
       Serial.println(F("[CMD]  -> gammaTab[1] updated"));
+      settings.gammaTab[1]=value;
     }
     // --- setpoints ---
     else if (key == "sp0") {
@@ -1369,27 +1402,34 @@ void handleWifiCommand(const String &cmd) {
       if (!walkMode)
         consigneCapteur = value;
       Serial.println(F("[CMD]  -> consigneCapteurTab[0] updated"));
+
+      settings.consigneCapteurTab[0]=value;
     } else if (key == "sp1") {
       consigneCapteurTab[1] = value;
       if (walkMode)
         consigneCapteur = value;
       Serial.println(F("[CMD]  -> consigneCapteurTab[1] updated"));
+      settings.consigneCapteurTab[1]=value;
     }
     // --- current limits ---
     else if (key == "minA") {
       minCurrent = value;
       mainPID.SetOutputLimits(minCurrent, maxCurrent);
       Serial.println(F("[CMD]  -> minCurrent updated, PID limits refreshed"));
+      settings.minCurrent=value;
     } else if (key == "maxA") {
       maxCurrent = value;
       mainPID.SetOutputLimits(minCurrent, maxCurrent);
       Serial.println(F("[CMD]  -> maxCurrent updated, PID limits refreshed"));
+      settings.maxCurrent=value;
     } else if (key == "minBrk") {
       minBrakeCurrent = value;
       Serial.println(F("[CMD]  -> minBrakeCurrent updated"));
+      settings.minBrakeCurrent=value;
     } else if (key == "maxBrk") {
       maxBrakeCurrent = value;
       Serial.println(F("[CMD]  -> maxBrakeCurrent updated"));
+      settings.maxBrakeCurrent=value;
     }
     // --- stream mode toggle ---
     else if (key == "stream") {
@@ -1407,23 +1447,28 @@ void handleWifiCommand(const String &cmd) {
     else if (key == "rollThr") {
       rollSpeedThreshold = value;
       Serial.println(F("[CMD]  -> rollSpeedThreshold updated"));
+      settings.rollSpeedThreshold=value;
     } else if (key == "brakeThr") {
       brakeThumbThrottleThreshold = value;
       Serial.println(F("[CMD]  -> brakeThumbThrottleThreshold updated"));
+      settings.brakeThumbThrottleThreshold=value;
     } else if (key == "emaAlpha") {
         emaAlpha = value;
         if (emaAlpha < 0.0f) emaAlpha = 0.0f;
         if (emaAlpha > 1.0f) emaAlpha = 1.0f;
         Serial.print(F("[CMD]  -> emaAlpha = "));
         Serial.println(emaAlpha, 4);
+        settings.emaAlpha=value;
     }
     else if (key == "maxSpeed") {
         maxSpeedLimit = value;
         Serial.println(F("[CMD]  -> maxSpeedLimit updated"));
+        settings.maxSpeedLimit=value;
     }
     else if (key == "speedGain") {
         speedBrakeGain = value;
         Serial.println(F("[CMD]  -> speedBrakeGain updated"));
+        settings.speedBrakeGain=value;
     }
     else {
       found = false;
@@ -1438,6 +1483,7 @@ void handleWifiCommand(const String &cmd) {
       wifiLogger.sendAsync(ack);
       Serial.print(F("[CMD] Sent: "));
       Serial.println(ack);
+      saveSettings();
     }
   }
 
@@ -1492,7 +1538,57 @@ void handleWifiCommand(const String &cmd) {
         F("ERR valid commands: SET <key> <value>  |  GET ALL"));
   }
 }
+// EEPROM address – avoid conflict with calibration at 0
+const int settingsEepromAddr = 64;
 
+void saveSettings() {
+  EEPROM.put(settingsEepromAddr, settings);
+  // On AVR, EEPROM.commit() is needed; on Pico it's automatic with put().
+  // If you still want to be safe:
+  //#if defined(ESP8266) || defined(ESP32) || defined(AVR)
+    EEPROM.commit();
+  //#endif
+  Serial.println(F("[EEPROM] Settings saved"));
+}
+
+void loadSettings() {
+  Settings tmp;
+  EEPROM.get(settingsEepromAddr, tmp);
+
+  // Validate magic number
+  if (tmp.magic == 0x4321ABCD) {
+    settings = tmp;
+    Serial.println(F("[EEPROM] Valid settings loaded"));
+  } else {
+    Serial.println(F("[EEPROM] No valid settings, using defaults"));
+    // Keep struct defaults (already set in settings constructor)
+    saveSettings();  // write defaults so next boot finds them
+  }
+
+  // Copy the struct fields into the working global variables
+  for (int i = 0; i < 3; i++) K1[i] = settings.K1[i];
+  for (int i = 0; i < 3; i++) K2[i] = settings.K2[i];
+  for (int i = 0; i < 2; i++) betaTab[i] = settings.betaTab[i];
+  for (int i = 0; i < 2; i++) gammaTab[i] = settings.gammaTab[i];
+  for (int i = 0; i < 2; i++) consigneCapteurTab[i] = settings.consigneCapteurTab[i];
+  minCurrent = settings.minCurrent;
+  maxCurrent = settings.maxCurrent;
+  minBrakeCurrent = settings.minBrakeCurrent;
+  maxBrakeCurrent = settings.maxBrakeCurrent;
+  alpha = settings.alpha;
+  rollSpeedThreshold = settings.rollSpeedThreshold;
+  brakeThumbThrottleThreshold = settings.brakeThumbThrottleThreshold;
+  emaAlpha = settings.emaAlpha;
+  maxSpeedLimit = settings.maxSpeedLimit;
+  speedBrakeGain = settings.speedBrakeGain;
+
+  // Re-apply dependent globals
+  beta = betaTab[walkMode ? 1 : 0];
+  brakeThreshold = gammaTab[walkMode ? 1 : 0];
+  consigneCapteur = consigneCapteurTab[walkMode ? 1 : 0];
+  mainPID.SetOutputLimits(minCurrent, maxCurrent);
+  mainPID.SetTunings(K1[0], K1[1], K1[2]);
+}
 // Display debug info on the OLED screen (tiny screen, keep it short)
 void displayDebugInfo() {
   static unsigned long lastDebugDisplay = 0;
